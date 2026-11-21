@@ -1,133 +1,137 @@
 import { describe, expect, it } from 'vitest';
-import { GitRepo, gitSeed } from '../src/tracks/git/repo';
-import { Shell } from '../src/tracks/linux/shell';
-import { gitMissions, linuxMissions, pythonMissions, type LinuxMissionState } from '../src/tracks/missions';
-import { TRACKS } from '../src/tracks';
+import { GitRepo } from '../src/tracks/git/repo';
+import { evaluateCheck } from '../src/lessons/checks';
+import { gitFields } from '../src/lessons/state';
+import { lessonById } from '../src/lessons';
+import type { Lesson, LessonMission, LessonState } from '../src/lessons/types';
 
-describe('git missions', () => {
-  it('walks a learner from init to rebase', () => {
-    const repo = new GitRepo(gitSeed());
-    const check = (id: string) => gitMissions.find((mission) => mission.id === id)?.check(repo.snapshot());
+const lesson = (id: string): Lesson => {
+  const found = lessonById(id);
+  if (!found) throw new Error(`missing lesson ${id}`);
+  return found;
+};
 
-    expect(check('git-init')).toBe(false);
-    repo.exec('git init');
-    expect(check('git-init')).toBe(true);
+const mission = (id: string, missionId: string): LessonMission => {
+  const found = lesson(id).missions.find((item) => item.id === missionId);
+  if (!found) throw new Error(`missing mission ${missionId}`);
+  return found;
+};
 
-    repo.workdir['app.js'] = `${repo.workdir['app.js']}\n// 첫 변경`;
-    repo.exec('git add .');
-    expect(check('git-first-commit')).toBe(false);
-    repo.exec('git commit -m "첫 커밋"');
-    expect(check('git-first-commit')).toBe(true);
+const passes = (id: string, missionId: string, state: LessonState) => evaluateCheck(mission(id, missionId).check, state);
 
-    repo.exec('git switch -c feature');
-    repo.workdir['feature.txt'] = 'x\n';
-    repo.exec('git add .');
-    repo.exec('git commit -m "기능 추가"');
-    expect(check('git-branch')).toBe(true);
-
-    repo.exec('git switch main');
-    repo.workdir['README.md'] = `${repo.workdir['README.md']}\nmain`;
-    repo.exec('git add .');
-    repo.exec('git commit -m "main 작업"');
-    expect(check('git-merge')).toBe(false);
-    repo.exec('git merge feature');
-    expect(check('git-merge')).toBe(true);
-
-    repo.exec('git switch -c tidy feature');
-    repo.workdir['tidy.txt'] = 'tidy\n';
-    repo.exec('git add .');
-    repo.exec('git commit -m "정리"');
-    expect(check('git-rebase')).toBe(false);
-    repo.exec('git rebase main');
-    expect(check('git-rebase')).toBe(true);
-  });
+const pythonState = (lessonId: string, overrides: Partial<LessonState> = {}): LessonState => ({
+  runtime: 'python',
+  files: { ...lesson(lessonId).files },
+  active: lesson(lessonId).entry,
+  runs: 0,
+  stdout: '',
+  stderr: '',
+  history: [],
+  lastCommand: '',
+  gitInitialized: false,
+  gitTotalCommits: 0,
+  gitMergeCommits: 0,
+  gitBranch: null,
+  gitBranches: [],
+  gitMainTip: null,
+  ...overrides,
 });
 
-describe('linux missions', () => {
-  it('passes each mission only after the real command ran', () => {
-    const shell = new Shell();
-    const state = (lastCommand: string, lastStdout: string): LinuxMissionState => ({
-      tree: shell.snapshot().tree,
-      cwd: shell.cwdPath(),
-      history: shell.history,
-      lastCommand,
-      lastStdout,
+const gitState = (lessonId: string, repo: GitRepo, overrides: Partial<LessonState> = {}): LessonState => ({
+  runtime: 'git',
+  files: { ...lesson(lessonId).files },
+  active: lesson(lessonId).entry,
+  runs: 0,
+  stdout: '',
+  stderr: '',
+  history: [],
+  lastCommand: '',
+  ...gitFields(repo.snapshot()),
+  ...overrides,
+});
+
+describe('Python lesson missions', () => {
+  it('starts with nothing complete and passes "run" only after a run with output', () => {
+    const cold = pythonState('python-hello');
+    expect(passes('python-hello', 'py-run', cold)).toBe(false);
+    const ran = { ...pythonState('python-hello'), runs: 1, stdout: '안녕하세요, 학습자입니다.\n5' };
+    expect(passes('python-hello', 'py-run', ran)).toBe(true);
+  });
+
+  it('wants the learner’s own name in both the file and the output', () => {
+    const edited = pythonState('python-hello', {
+      files: { ...lesson('python-hello').files, 'main.py': 'name = "Vísna Sól"\nprint(f"안녕하세요, {name}입니다.")' },
+      runs: 1,
+      stdout: '안녕하세요, Vísna Sól입니다.',
     });
-    const check = (id: string, lastCommand: string, lastStdout = '') =>
-      linuxMissions.find((mission) => mission.id === id)?.check(state(lastCommand, lastStdout)) ?? false;
+    expect(passes('python-hello', 'py-name', edited)).toBe(true);
+    expect(passes('python-hello', 'py-name', pythonState('python-hello', { runs: 1, stdout: '안녕하세요, 학습자입니다.' }))).toBe(false);
+  });
 
-    expect(check('linux-look', '')).toBe(false);
-    shell.exec('pwd');
-    expect(check('linux-look', 'pwd', '/home/learner/work')).toBe(false);
-    const ls = shell.exec('ls -la');
-    expect(check('linux-look', 'ls -la', ls.lines.map((line) => line.text).join('\n'))).toBe(true);
+  it('accepts a loop only when 1..5 are printed and a for loop exists', () => {
+    const loop = pythonState('python-hello', {
+      files: { ...lesson('python-hello').files, 'main.py': 'for i in range(1, 6):\n    print(i)' },
+      runs: 1,
+      stdout: '1\n2\n3\n4\n5',
+    });
+    expect(passes('python-hello', 'py-loop', loop)).toBe(true);
+    expect(passes('python-hello', 'py-loop', { ...loop, stdout: '1\n2\n3' })).toBe(false);
+    expect(passes('python-hello', 'py-loop', { ...loop, files: { 'main.py': 'print(1)' } })).toBe(false);
+  });
 
-    expect(check('linux-mkdir', 'ls')).toBe(false);
-    shell.exec('mkdir practice');
-    expect(check('linux-mkdir', 'mkdir practice')).toBe(false);
-    shell.exec('touch practice/todo.txt');
-    expect(check('linux-mkdir', 'touch practice/todo.txt')).toBe(true);
-
-    expect(check('linux-echo', 'touch practice/todo.txt')).toBe(false);
-    shell.exec('echo "리눅스 연습" > practice/todo.txt');
-    expect(check('linux-echo', 'echo "리눅스 연습" > practice/todo.txt')).toBe(true);
-
-    const piped = shell.exec('cat ~/logs/access.log | grep 404 | wc -l');
-    expect(check('linux-pipe', 'cat ~/logs/access.log | grep 404 | wc -l', piped.lines.map((line) => line.text).join('\n'))).toBe(true);
-    expect(check('linux-pipe', 'ls', '3')).toBe(false);
-
-    const found = shell.exec('find . -name "*.md"');
-    expect(check('linux-find', 'find . -name "*.md"', found.lines.map((line) => line.text).join('\n'))).toBe(true);
+  it('accepts the sum when 285 is printed by code that calls sum()', () => {
+    const sum = pythonState('python-hello', {
+      files: { ...lesson('python-hello').files, 'practice.py': 'print(sum([12, 45, 7, 23, 88, 34, 61, 15]))' },
+      runs: 1,
+      stdout: '285',
+    });
+    expect(passes('python-hello', 'py-sum', sum)).toBe(true);
+    expect(passes('python-hello', 'py-sum', { ...sum, stdout: '284' })).toBe(false);
   });
 });
 
-describe('python missions', () => {
-  const base = { activePath: 'hello.py', lastStderr: '', runs: 1 };
+describe('Git lesson missions', () => {
+  const repo = () => new GitRepo({ ...lesson('git-basics').files });
+  const commitAll = (target: GitRepo, message: string) => {
+    target.exec('git add .');
+    target.exec(`git commit -m "${message}"`);
+  };
 
-  it('requires the real output, not just a click', () => {
-    const empty = { ...base, files: { 'hello.py': 'print("x")' }, lastStdout: '' };
-    expect(pythonMissions[0].check(empty as never)).toBe(false);
+  it('walks init → commit → branch → merge, and nothing passes early', () => {
+    const target = repo();
+    expect(passes('git-basics', 'git-init', gitState('git-basics', target))).toBe(false);
+    expect(passes('git-basics', 'git-first-commit', gitState('git-basics', target))).toBe(false);
 
-    const ran = { ...base, files: { 'hello.py': 'print("x")' }, lastStdout: 'x' };
-    expect(pythonMissions[0].check(ran as never)).toBe(true);
+    target.exec('git init');
+    const initialized = gitState('git-basics', target);
+    expect(passes('git-basics', 'git-init', initialized)).toBe(true);
+    expect(passes('git-basics', 'git-first-commit', initialized)).toBe(false);
+    expect(passes('git-basics', 'git-branch', initialized)).toBe(false);
 
-    const fstring = {
-      ...base,
-      files: { 'hello.py': 'name = "Vísna Sól"\nprint(f"안녕하세요, {name}입니다.")' },
-      lastStdout: '안녕하세요, Vísna Sól입니다.',
-    };
-    expect(pythonMissions[1].check(fstring as never)).toBe(true);
-    expect(pythonMissions[1].check(ran as never)).toBe(false);
+    commitAll(target, '첫 커밋');
+    expect(passes('git-basics', 'git-first-commit', gitState('git-basics', target))).toBe(true);
 
-    const looped = {
-      ...base,
-      files: { 'loops.py': 'for i in range(1, 6):\n    print(i)' },
-      lastStdout: '1\n2\n3\n4\n5',
-    };
-    expect(pythonMissions[2].check(looped as never)).toBe(true);
-    expect(pythonMissions[2].check({ ...looped, lastStdout: '1\n2\n3' } as never)).toBe(false);
+    target.exec('git switch -c feature');
+    expect(passes('git-basics', 'git-branch', gitState('git-basics', target))).toBe(false);
+    target.workdir['hello.txt'] = `${target.workdir['hello.txt']}\nfeature 작업`;
+    target.exec('git add .');
+    target.exec('git commit -m "기능 추가"');
+    expect(passes('git-basics', 'git-branch', gitState('git-basics', target))).toBe(true);
 
-    const summed = { ...base, files: { 'numbers.py': 'print(sum(numbers))' }, lastStdout: '285' };
-    expect(pythonMissions[3].check(summed as never)).toBe(true);
-
-    const averaged = {
-      ...base,
-      files: { 'numbers.py': 'def average(values):\n    return sum(values) / len(values)\nprint(f"{average(numbers):.2f}")' },
-      lastStdout: '35.63',
-    };
-    expect(pythonMissions[4].check(averaged as never)).toBe(true);
-    expect(pythonMissions[4].check(summed as never)).toBe(false);
+    target.exec('git switch main');
+    target.workdir['notes.md'] = `${target.workdir['notes.md']}\n- main 작업`;
+    target.exec('git add .');
+    target.exec('git commit -m "main 작업"');
+    expect(passes('git-basics', 'git-merge', gitState('git-basics', target))).toBe(false);
+    target.exec('git merge feature');
+    expect(passes('git-basics', 'git-merge', gitState('git-basics', target))).toBe(true);
   });
-});
 
-describe('track seeds', () => {
-  it('start from files that do not already satisfy a mission', () => {
-    const python = TRACKS.python.files();
-    expect(python['numbers.py']).not.toContain('285');
-    expect(python['loops.py']).not.toContain('range(1, 6)');
-    const git = TRACKS.git.files();
-    expect(Object.keys(git)).toContain('README.md');
-    const linux = TRACKS.linux.files();
-    expect(linux['script.sh']).toContain('pwd');
+  it('does not count a branch that still points at main', () => {
+    const target = repo();
+    target.exec('git init');
+    commitAll(target, 'base');
+    target.exec('git branch feature');
+    expect(passes('git-basics', 'git-branch', gitState('git-basics', target))).toBe(false);
   });
 });

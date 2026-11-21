@@ -1,12 +1,12 @@
 import { useMemo, useRef } from 'react';
 import { t, type Lang } from '../i18n';
-import type { TrackId } from '../tracks/types';
+import type { RuntimeId } from '../tracks/types';
 import { IconPlay } from './Icons';
 import { langForPath, tokenize } from './highlight';
 
 interface EditorProps {
   lang: Lang;
-  track: TrackId;
+  runtime: RuntimeId;
   files: Record<string, string>;
   active: string;
   running: boolean;
@@ -15,13 +15,13 @@ interface EditorProps {
   onRun: () => void;
 }
 
-export function Editor({ lang, track, files, active, running, onChange, onOpen, onRun }: EditorProps) {
+export function Editor({ lang, runtime, files, active, running, onChange, onOpen, onRun }: EditorProps) {
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
   const code = files[active] ?? '';
   const lineCount = code.split('\n').length;
   const names = Object.keys(files).sort();
-  const runLabel = track === 'git' ? t(lang, 'runGit') : track === 'linux' ? t(lang, 'runLinux') : t(lang, 'run');
+  const runLabel = runtime === 'git' ? t(lang, 'runGit') : t(lang, 'run');
   const tokens = useMemo(() => tokenize(code, langForPath(active)), [code, active]);
 
   const insertTab = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {

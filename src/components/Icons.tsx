@@ -156,3 +156,16 @@ export const IconSpark = (p: IconProps) => (
     <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9Z" />
   </svg>
 );
+
+export const IconBook = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4 5.2A1.7 1.7 0 0 1 5.7 3.5H11v17H5.7A1.7 1.7 0 0 1 4 18.8Z" />
+    <path d="M20 5.2A1.7 1.7 0 0 0 18.3 3.5H13v17h5.3A1.7 1.7 0 0 0 20 18.8Z" />
+  </svg>
+);
+
+export const IconArrow = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4.5 12h14M13 6.5l5.5 5.5L13 17.5" />
+  </svg>
+);

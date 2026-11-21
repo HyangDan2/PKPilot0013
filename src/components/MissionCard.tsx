@@ -1,10 +1,10 @@
 import { t, type Lang } from '../i18n';
-import type { Mission } from '../tracks/types';
+import type { LessonMission } from '../lessons/types';
 import { IconBulb, IconCheck, IconReset, IconSpark } from './Icons';
 
 interface MissionCardProps {
   lang: Lang;
-  mission: Mission<never> | null;
+  mission: LessonMission | null;
   index: number;
   total: number;
   done: number;
