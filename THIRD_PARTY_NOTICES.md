@@ -7,8 +7,7 @@
 | 패키지 | 라이선스 | 용도 |
 | --- | --- | --- |
 | [React](https://react.dev) / React DOM | MIT | UI |
-| [sql.js](https://github.com/sql-js/sql.js) (SQLite 3 컴파일) | MIT (SQLite는 Public Domain) | SQL 트랙의 실제 SQLite 실행. `public/sqljs/`의 `.wasm`은 이 저장소에서 직접 서빙합니다 |
-| [Pyodide](https://pyodide.org) (CPython 3.13 WASM) | MPL-2.0 (CPython은 PSF-2.0, 그 외 의존 라이브러리는 각 라이선스) | Python 트랙의 실제 CPython 실행. 앱 번들에는 포함하지 않고, 첫 실행 때 `cdn.jsdelivr.net`에서 내려받습니다 |
+| [Pyodide](https://pyodide.org) (CPython 3.13 WASM) | MPL-2.0 (CPython은 PSF-2.0, 그 외 의존 라이브러리는 각 라이선스) | Python 강의의 실제 CPython 실행. 앱 번들에는 포함하지 않고, 첫 실행 때 `cdn.jsdelivr.net`에서 내려받습니다 |
 
 ## 개발 의존성
 

@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test';
 
-test.describe('workspace behaviour', () => {
+test.describe('workspace behaviour inside a lesson', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test('creates and deletes files, completes and recalls commands', async ({ page }) => {
+  test('creates and deletes files, completes and recalls commands, restarts the lesson', async ({ page }) => {
     await page.goto('./');
+    await page.getByTestId('lesson-card-git-basics').click();
     const input = page.getByTestId('term-input');
 
     // Tab completion on git subcommands
@@ -17,9 +18,12 @@ test.describe('workspace behaviour', () => {
     await input.press('Enter');
     await input.press('ArrowUp');
     await expect(input).toHaveValue('git init');
-    await input.press('Escape');
+
+    // the lesson material is the left pane's first tab
+    await expect(page.getByTestId('lesson-doc')).toContainText('이 강의에서 배우는 것');
 
     // new file through the explorer
+    await page.getByTestId('side-tab-files').click();
     await page.getByTestId('new-file').click();
     await page.locator('.file-row.editing input').fill('note.md');
     await page.locator('.file-row.editing input').press('Enter');
@@ -39,26 +43,29 @@ test.describe('workspace behaviour', () => {
     await page.getByRole('button', { name: '힌트 숨기기' }).click();
     await expect(page.locator('.mission-hint')).toHaveCount(0);
 
-    // free sandbox
+    // free practice (the checklist lives in the Lesson tab)
+    await page.getByTestId('side-tab-lesson').click();
     await page.getByTestId('mission-free').click();
     await expect(page.getByTestId('mission-card')).toContainText('자유 실습');
     await page.getByTestId('mission-git-init').click();
     await expect(page.getByTestId('mission-card')).toContainText('저장소 초기화');
 
     // delete a file (and keep one behind)
+    await page.getByTestId('side-tab-files').click();
     await page.getByTestId('file-note.md').hover();
     await page.locator('.file-row.on .file-del').click();
     await expect(page.getByTestId('file-note.md')).toHaveCount(0);
 
-    // reset this track
-    await page.getByRole('button', { name: '이 트랙 다시 시작' }).click();
+    // restart this lesson: progress and files go back
+    await page.getByRole('button', { name: '이 강의 다시 시작' }).click();
     await expect(page.locator('.mission-row.done')).toHaveCount(0);
     await expect(page.getByTestId('file-note.md')).toHaveCount(0);
   });
 
-  test('keeps the four mobile tabs and quick chips usable', async ({ page }) => {
+  test('keeps the quick chips usable on a phone', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('./');
+    await page.getByTestId('lesson-card-git-basics').click();
     await page.getByTestId('mtab-terminal').click();
     await expect(page.locator('.term-chips')).toBeVisible();
     await page.locator('.term-chips .chip', { hasText: 'git status' }).click();

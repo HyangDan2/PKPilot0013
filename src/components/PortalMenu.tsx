@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { t, type Lang } from '../i18n';
-import { IconApps, IconDots, IconExternal, IconHome, IconReset, IconTerminal } from './Icons';
+import { IconApps, IconBook, IconDots, IconExternal, IconHome, IconReset, IconTerminal } from './Icons';
 
 interface PortalMenuProps {
   lang: Lang;
-  onResetFiles: () => void;
-  onClearTerminal: () => void;
+  onHome: () => void;
+  onResetFiles?: () => void;
+  onClearTerminal?: () => void;
 }
 
 /**
- * The ⋮ menu every HD2Lab title bar carries: the way back to the portal, the
- * catalog, the source — and the two housekeeping actions of this workspace.
+ * The ⋮ menu every HD2Lab title bar carries: back to the lesson catalog, the
+ * portal, the catalog of apps, the source — and, inside a lesson, the two
+ * housekeeping actions of this workspace.
  */
-export function PortalMenu({ lang, onResetFiles, onClearTerminal }: PortalMenuProps) {
+export function PortalMenu({ lang, onHome, onResetFiles, onClearTerminal }: PortalMenuProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -32,6 +34,11 @@ export function PortalMenu({ lang, onResetFiles, onClearTerminal }: PortalMenuPr
     };
   }, [open]);
 
+  const goHome = () => {
+    onHome();
+    setOpen(false);
+  };
+
   return (
     <div className="portal" ref={ref}>
       <button
@@ -48,6 +55,10 @@ export function PortalMenu({ lang, onResetFiles, onClearTerminal }: PortalMenuPr
       {open && (
         <div className="portal-panel" role="menu" aria-label={t(lang, 'menuTitle')}>
           <p className="portal-head">{t(lang, 'menuTitle')}</p>
+          <button type="button" className="portal-item" role="menuitem" onClick={goHome} data-testid="menu-home">
+            <span className="portal-ic"><IconBook size={15} /></span>
+            <span className="portal-text"><b>{t(lang, 'navHome')}</b><small>{t(lang, 'navHomeHint')}</small></span>
+          </button>
           <a className="portal-item" role="menuitem" href="https://hyangdan2.github.io/" target="_blank" rel="noopener noreferrer">
             <span className="portal-ic"><IconHome size={15} /></span>
             <span className="portal-text"><b>{t(lang, 'navWebHq')}</b><small>{t(lang, 'navWebHqHint')}</small></span>
@@ -75,15 +86,35 @@ export function PortalMenu({ lang, onResetFiles, onClearTerminal }: PortalMenuPr
             <span className="portal-text"><b>{t(lang, 'navGithub')}</b><small>{t(lang, 'navGithubHint')}</small></span>
             <IconExternal size={13} />
           </a>
-          <div className="portal-divider" role="separator" />
-          <button type="button" className="portal-item" role="menuitem" onClick={() => { onResetFiles(); setOpen(false); }}>
-            <span className="portal-ic"><IconReset size={15} /></span>
-            <span className="portal-text"><b>{t(lang, 'navResetFiles')}</b><small>{t(lang, 'navResetFilesHint')}</small></span>
-          </button>
-          <button type="button" className="portal-item" role="menuitem" onClick={() => { onClearTerminal(); setOpen(false); }}>
-            <span className="portal-ic"><IconTerminal size={15} /></span>
-            <span className="portal-text"><b>{t(lang, 'navClearTerminal')}</b><small>{t(lang, 'navClearTerminalHint')}</small></span>
-          </button>
+          {onResetFiles && onClearTerminal && (
+            <>
+              <div className="portal-divider" role="separator" />
+              <button
+                type="button"
+                className="portal-item"
+                role="menuitem"
+                onClick={() => {
+                  onResetFiles();
+                  setOpen(false);
+                }}
+              >
+                <span className="portal-ic"><IconReset size={15} /></span>
+                <span className="portal-text"><b>{t(lang, 'navResetFiles')}</b><small>{t(lang, 'navResetFilesHint')}</small></span>
+              </button>
+              <button
+                type="button"
+                className="portal-item"
+                role="menuitem"
+                onClick={() => {
+                  onClearTerminal();
+                  setOpen(false);
+                }}
+              >
+                <span className="portal-ic"><IconTerminal size={15} /></span>
+                <span className="portal-text"><b>{t(lang, 'navClearTerminal')}</b><small>{t(lang, 'navClearTerminalHint')}</small></span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

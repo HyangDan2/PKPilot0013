@@ -146,8 +146,8 @@ def build_icons(out_dir: str):
 MANIFEST = {
     "name": "HD2Lab Vísna Sól",
     "short_name": "Vísna Sól",
-    "description": "Git·Python·리눅스 셸·SQL을 브라우저 안에서 직접 실행하며 배우는 HD2Lab 학습 샌드박스. "
-                   "커밋 그래프 시각화, Pyodide 파이썬, SQLite까지 — 설치 0, 업로드 0 B.",
+    "description": "마크다운 강의를 읽고 Python·Git을 브라우저에서 직접 실행하며 배우는 HD2Lab 기초 강의 IDE. "
+                   "Pyodide 파이썬, 커밋 그래프 — 설치 0, 업로드 0 B.",
     "lang": "ko",
     "dir": "ltr",
     "start_url": "./",
@@ -156,7 +156,7 @@ MANIFEST = {
     "orientation": "any",
     "background_color": "#FAFAFD",
     "theme_color": "#FAFAFD",
-    "categories": ["utilities", "photo", "productivity"],
+    "categories": ["education", "productivity", "utilities"],
     "icons": [
         {"src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
         {"src": "favicon-32x32.png", "sizes": "32x32", "type": "image/png", "purpose": "any"},
@@ -202,7 +202,7 @@ def build_og(out_dir: str) -> str:
     # 2) kicker + privacy mark
     r = 5 * S
     d.ellipse((104 * S - r, 90 * S - r, 104 * S + r, 90 * S + r), fill=PURPLE)
-    spaced(d, (124 * S, 96 * S), "13 / SANDBOX · VÍSNA SÓL", font(14 * S, "Medium"), MUTED, spacing=2.2 * S)
+    spaced(d, (124 * S, 96 * S), "13 / LESSON IDE · VÍSNA SÓL", font(14 * S, "Medium"), MUTED, spacing=2.2 * S)
     d.text((1096 * S, 96 * S), "100% CLIENT-SIDE · 0 B UPLOAD", font=mono(13 * S), fill=DIM, anchor="rs")
 
     # 3) dual-skew mark + HD2Lab | Vísna Sól
@@ -218,28 +218,28 @@ def build_og(out_dir: str) -> str:
 
     # 4) headline + sub copy
     f_head = font(48 * S, "Bold")
-    d.text((104 * S, 254 * S), "코드를 직접 치면서,", font=f_head, fill=INK, anchor="ls")
+    d.text((104 * S, 266 * S), "강의를 고르면,", font=f_head, fill=INK, anchor="ls")
 
-    lead = "배우는 "
-    hl = "샌드박스"
-    tail = "."
+    lead = "바로 "
+    hl = "실습"
+    tail = "이 시작됩니다."
     x = 104 * S
-    d.text((x, 310 * S), lead, font=f_head, fill=INK, anchor="ls")
+    d.text((x, 322 * S), lead, font=f_head, fill=INK, anchor="ls")
     x += d.textlength(lead, font=f_head)
-    d.text((x, 310 * S), hl, font=f_head, fill=PURPLE_DEEP, anchor="ls")
+    d.text((x, 322 * S), hl, font=f_head, fill=PURPLE_DEEP, anchor="ls")
     x += d.textlength(hl, font=f_head)
-    d.text((x, 310 * S), tail, font=f_head, fill=INK, anchor="ls")
+    d.text((x, 322 * S), tail, font=f_head, fill=INK, anchor="ls")
 
-    d.text((105 * S, 352 * S), "Git 커밋 그래프 · 진짜 CPython(Pyodide) · 리눅스 셸 · SQLite —", font=font(17.5 * S), fill=MUTED)
-    d.text((105 * S, 380 * S), "설치도, 업로드도 없이 브라우저 안에서 끝나는 네 가지 실습 트랙", font=font(17.5 * S), fill=MUTED)
+    d.text((105 * S, 362 * S), "마크다운 강의 자료 · 진짜 CPython(Pyodide) · Git 커밋 그래프 —", font=font(17.5 * S), fill=MUTED)
+    d.text((105 * S, 390 * S), "강의 파일 하나를 더하면 새 강의가 되는, 재활용 가능한 기초 강의 IDE", font=font(17.5 * S), fill=MUTED)
 
     # 5) three tiles
     tiles = [
-        ("01 / GIT", "커밋 그래프", ["init부터 merge·rebase까지,", "SVG 그래프로 한눈에."]),
+        ("01 / LESSON", "마크다운 강의", ["강의 자료와 미션을", "md 파일 하나로."]),
         ("02 / PYTHON", "진짜 CPython", ["Pyodide로 실행하는", "실제 파이썬 런타임."]),
-        ("03 / LINUX · SQL", "셸과 SQLite", ["파이프·리다이렉트와", "스키마까지 직접 다루기."]),
+        ("03 / GIT", "커밋 그래프", ["init부터 merge까지,", "결과 카드로 한눈에."]),
     ]
-    tile_w, gap, th, top = 264, 16, 120, 410
+    tile_w, gap, th, top = 264, 16, 118, 420
     for i, (kicker, heading, desc) in enumerate(tiles):
         x0 = 96 + i * (tile_w + gap)
         rrect(d, sc(x0, top, x0 + tile_w, top + th), 10 * S, fill=TILE, outline=TILE_BORDER, width=1.2 * S)
@@ -250,7 +250,7 @@ def build_og(out_dir: str) -> str:
 
     # 6) footer rail
     d.line([(104 * S, 566 * S), (1096 * S, 566 * S)], fill=LINE, width=int(1 * S))
-    spaced(d, (104 * S, 588 * S), "VÍSNA SÓL · HD2LAB CODING & CLI SANDBOX", font(11.5 * S, "Medium"), MUTED, spacing=1.5 * S)
+    spaced(d, (104 * S, 588 * S), "VÍSNA SÓL · HD2LAB LESSON IDE", font(11.5 * S, "Medium"), MUTED, spacing=1.5 * S)
     d.text((1096 * S, 588 * S), "hyangdan2.github.io/PKPilot0013", font=mono(11.5 * S), fill=DIM, anchor="rs")
 
     out = img.resize((1200, 630), Image.LANCZOS)

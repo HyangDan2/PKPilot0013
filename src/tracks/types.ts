@@ -1,6 +1,7 @@
-/** Shared vocabulary for the four sandbox tracks. */
+/** Shared vocabulary for the sandbox terminals. */
 
-export type TrackId = 'git' | 'python' | 'linux' | 'sql';
+/** The execution environments a lesson can declare. */
+export type RuntimeId = 'python' | 'git';
 
 export type Tone =
   | 'plain'
@@ -47,23 +48,3 @@ export const blank = (): OutLine => ({ text: '' });
 export const result = (lines: OutLine[], exit = 0): CommandResult => ({ lines, exit });
 
 export const fail = (lines: OutLine[]): CommandResult => ({ lines, exit: 1 });
-
-/** A mission the learner can finish by working in one track. */
-export interface Mission<TState> {
-  id: string;
-  title: { ko: string; en: string };
-  goal: { ko: string; en: string };
-  hint: { ko: string; en: string };
-  /** true when the learner's current state satisfies the goal. */
-  check: (state: TState) => boolean;
-}
-
-export interface TrackState {
-  files: Record<string, string>;
-  activePath: string;
-  history: string[];
-  lastCommand?: string;
-  lastStdout: string;
-  lastStderr: string;
-  runs: number;
-}
