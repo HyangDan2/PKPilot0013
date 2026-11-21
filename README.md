@@ -67,6 +67,11 @@ tests/                 Vitest unit suites + Playwright desktop/mobile runs
 `.github/workflows/deploy.yml` builds on every push to `main` (type check → unit tests → build)
 and publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
 
+The workflow could not be pushed by the GitHub App that maintains this repository (no `workflows`
+permission), so the same file is kept at [`deploy/deploy.yml`](deploy/deploy.yml). Moving it to
+`.github/workflows/deploy.yml` and choosing **Settings → Pages → Source: GitHub Actions** is the
+only manual step — see [`deploy/README.md`](deploy/README.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party components are listed in
