@@ -1,0 +1,50 @@
+{
+  "name": "HD2Lab Vísna Sól",
+  "short_name": "Vísna Sól",
+  "description": "Git·Python·리눅스 셸·SQL을 브라우저 안에서 직접 실행하며 배우는 HD2Lab 학습 샌드박스. 커밋 그래프 시각화, Pyodide 파이썬, SQLite까지 — 설치 0, 업로드 0 B.",
+  "lang": "ko",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#FAFAFD",
+  "theme_color": "#FAFAFD",
+  "categories": [
+    "utilities",
+    "photo",
+    "productivity"
+  ],
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
