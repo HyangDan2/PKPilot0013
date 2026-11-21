@@ -27,8 +27,14 @@ export function Editor({ lang, track, files, active, running, onChange, onOpen, 
   const insertTab = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const area = event.currentTarget;
     const { selectionStart, selectionEnd } = area;
-    area.setRangeText('  ', selectionStart, selectionEnd, 'end');
-    onChange(area.value);
+    const next = `${area.value.slice(0, selectionStart)}  ${area.value.slice(selectionEnd)}`;
+    const caret = selectionStart + 2;
+    onChange(next);
+    // the controlled value resets the caret to the end — put it back where the
+    // learner was typing, on the next frame.
+    requestAnimationFrame(() => {
+      area.setSelectionRange(caret, caret);
+    });
   };
 
   const syncScroll = (area: HTMLTextAreaElement) => {
