@@ -9,7 +9,7 @@ draws in CSS:
     apple-touch-icon.png(180), icon-192.png, icon-512.png, manifest.json,
     og-image.png / social-preview.png (1200×630)
 
-The OG card follows the Shutterplate / Nordlys card layout — Soft Iris grid,
+The OG card follows the Shutterplate / CinePlate card layout — Soft Iris grid,
 white container, kicker + privacy mark, dual-skew lockup, two-line headline,
 sub copy, three tiles and a footer rail — filled with CodePlayground content.
 
