@@ -77,8 +77,24 @@ export function LessonWorkspace({ lesson, lang, theme, onLang, onTheme, onHome }
         )}
       </div>
 
-      <div className={`workspace tab-${mobileTab}`}>
-        <Sidebar
+      {sandbox.syncConflict && (
+        <div className="sync-banner" role="alert" data-testid="sync-conflict">
+          <div className="sync-text">
+            <b>{t(lang, 'syncConflictTitle')}</b>
+            <span>{t(lang, 'syncConflictBody')}</span>
+          </div>
+          <div className="sync-actions">
+            <button type="button" data-testid="sync-keep-mine" onClick={() => sandbox.resolveSync('mine')}>
+              {t(lang, 'syncKeepMine')}
+            </button>
+            <button type="button" data-testid="sync-load-theirs" onClick={() => sandbox.resolveSync('theirs')}>
+              {t(lang, 'syncLoadTheirs')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className={`workspace tab-${mobileTab}`}>        <Sidebar
           lang={lang}
           lesson={lesson}
           files={session.files}

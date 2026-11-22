@@ -27,13 +27,16 @@ import type { CommandResult, OutLine, RuntimeId } from '../tracks/types';
 import { out } from '../tracks/types';
 import { evaluateCheck } from '../lessons/checks';
 import { lessonState, sourceHash } from './lesson-state';
+import { t, type Lang } from '../i18n';
 import type { Lesson } from '../lessons/types';
-import type { Lang } from '../i18n';
 import {
   bootstrapSession,
   clearSavedSession,
   projectGit,
+  readSavedSession,
+  subscribeToSessionChanges,
   writeSavedSession,
+  type SaveConflict,
   type Session,
   type TermEntry,
 } from './session';
@@ -74,6 +77,10 @@ export interface SandboxApi {
   /** true when the last run's source no longer matches the editor. */
   staleRun: boolean;
   toast: Toast | null;
+  /** Another tab saved a newer copy while this one has unsaved work. */
+  syncConflict: SaveConflict | null;
+  /** Resolves that conflict: keep this tab's work, or load the other tab's. */
+  resolveSync: (choice: 'mine' | 'theirs') => void;
   submit: (command: string) => Promise<void>;
   runActive: () => Promise<void>;
   stopRun: () => void;
@@ -90,7 +97,7 @@ export interface SandboxApi {
 }
 
 export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
-  const boot = useRef<{ session: Session; repo: GitRepo | null } | null>(null);
+  const boot = useRef<{ session: Session; repo: GitRepo | null; revision: number } | null>(null);
   if (boot.current === null) boot.current = bootstrapSession(lesson);
 
   const [session, setSession] = useState<Session>(boot.current.session);
@@ -106,6 +113,11 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   langRef.current = lang;
 
   const engine = useRef<GitRepo | null>(boot.current.repo);
+  /** The stored revision this tab is working from — bumped by every write. */
+  const revision = useRef(boot.current.revision);
+  /** Signature of the last state this tab saved, to tell "unsaved work" apart. */
+  const savedSignature = useRef<string>(signature(boot.current.session, boot.current.repo));
+  const [syncConflict, setSyncConflict] = useState<SaveConflict | null>(null);
   /** Bumped whenever the lesson is restarted, so late results are dropped. */
   const generation = useRef(0);
   const saveTimer = useRef<number | null>(null);
@@ -123,11 +135,22 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   }, []);
 
   const persist = useCallback(
-    (next: Session) => {
+    (next: Session, force = false) => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       const repo = lesson.runtime === 'git' ? engine.current : null;
       saveTimer.current = window.setTimeout(() => {
-        writeSavedSession(lesson.id, next, repo);
+        const result = writeSavedSession(lesson.id, next, repo, {
+          baseRevision: revision.current,
+          force,
+        });
+        if (result.ok) {
+          revision.current = result.revision;
+          savedSignature.current = signature(next, repo);
+          setSyncConflict(null);
+        } else {
+          // Someone else's newer copy stays untouched until the learner decides.
+          setSyncConflict(result.conflict);
+        }
       }, 200);
     },
     [lesson.id, lesson.runtime],
@@ -141,7 +164,11 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       generation.current += 1;
       disposePython();
       const last = sessionRef.current;
-      writeSavedSession(lesson.id, last, lesson.runtime === 'git' ? engine.current : null);
+      // Leaving the tab saves only what it is allowed to: a newer copy in
+      // another tab is not overwritten by a tab that is closing.
+      writeSavedSession(lesson.id, last, lesson.runtime === 'git' ? engine.current : null, {
+        baseRevision: revision.current,
+      });
     },
     [lesson.id, lesson.runtime],
   );
@@ -187,6 +214,65 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     (next: Session): Session =>
       lesson.runtime === 'git' ? { ...next, gitSnap: getGit().snapshot() } : next,
     [lesson.runtime, getGit],
+  );
+
+  /** Rebuilds this tab from the stored copy — the other tab's newer state. */
+  const adoptSaved = useCallback((): boolean => {
+    const saved = readSavedSession(lesson.id);
+    if (!saved) return false;
+    const restored = lesson.runtime === 'git' ? GitRepo.fromState(saved.git) : null;
+    const files = restored ? { ...restored.workdir } : { ...saved.files };
+    if (runningRef.current) cancelPython();
+    generation.current += 1; // a run started from the old files is no longer wanted
+    runningRef.current = false;
+    setRunning(false);
+    engine.current = restored;
+    const active = saved.active in files ? saved.active : Object.keys(files).sort()[0] ?? '';
+    const next: Session = {
+      ...sessionRef.current,
+      files,
+      active,
+      done: saved.done,
+      missionIndex: Math.min(Math.max(0, saved.missionIndex), lesson.missions.length),
+      free: saved.free || saved.missionIndex >= lesson.missions.length,
+      lastRun: null,
+      lastStdout: '',
+      lastStderr: '',
+      gitSnap: restored ? restored.snapshot() : null,
+    };
+    revision.current = saved.revision;
+    savedSignature.current = signature(next, restored);
+    sessionRef.current = next;
+    setSession(next);
+    setSyncConflict(null);
+    return true;
+  }, [lesson.id, lesson.missions.length, lesson.runtime]);
+
+  // Another tab saved. If this tab holds unsaved work, its own save is stopped
+  // and the learner is asked; if it holds nothing new, it simply follows along.
+  useEffect(() => {
+    const unsubscribe = subscribeToSessionChanges(lesson.id, (change) => {
+      if (change.revision <= revision.current) return;
+      const repo = lesson.runtime === 'git' ? engine.current : null;
+      if (signature(sessionRef.current, repo) === savedSignature.current) {
+        if (adoptSaved()) notify({ text: t(langRef.current, 'syncAdopted') });
+        return;
+      }
+      setSyncConflict({ revision: change.revision, updatedAt: change.updatedAt });
+    });
+    return unsubscribe;
+  }, [lesson.id, lesson.runtime, adoptSaved, notify]);
+
+  const resolveSync = useCallback(
+    (choice: 'mine' | 'theirs') => {
+      if (choice === 'mine') {
+        notify({ text: t(langRef.current, 'syncKept') });
+        persist(sessionRef.current, true);
+        return;
+      }
+      if (adoptSaved()) notify({ text: t(langRef.current, 'syncDropped') });
+    },
+    [adoptSaved, notify, persist],
   );
 
   /** Working tree → editor. Called after every Git command. */
@@ -511,6 +597,9 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const resetLesson = useCallback(() => {
     restartEngine();
     clearSavedSession(lesson.id);
+    revision.current = 0;
+    savedSignature.current = '';
+    setSyncConflict(null);
     const fresh = bootstrapSession(lesson).session;
     commit(withGitSnapshot({ ...fresh, term: [], history: [], done: [], missionIndex: 0, free: false, runs: 0, lastRun: null }));
     notify({
@@ -587,6 +676,8 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       pyProgress,
       staleRun,
       toast,
+      syncConflict,
+      resolveSync,
       submit,
       runActive,
       stopRun,
@@ -602,8 +693,9 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       toggleHint,
     }),
     [
-      lesson, runtime, session, activeMission, running, pyProgress, staleRun, toast, submit, runActive, stopRun, setFile,
-      openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete, selectMission, toggleHint,
+      lesson, runtime, session, activeMission, running, pyProgress, staleRun, toast, syncConflict, resolveSync, submit,
+      runActive, stopRun, setFile, openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete,
+      selectMission, toggleHint,
     ],
   );
 }
@@ -611,4 +703,16 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
 /** For a Git lesson the working tree wins over an editor-side file map. */
 function repositoryFiles(runtime: RuntimeId, getGit: () => GitRepo, files: Record<string, string>) {
   return runtime === 'git' ? { ...getGit().workdir } : files;
+}
+
+/** What "this tab has unsaved work" means: everything a save would write. */
+function signature(session: Session, repo: GitRepo | null): string {
+  return JSON.stringify({
+    files: session.files,
+    active: session.active,
+    done: session.done,
+    missionIndex: session.missionIndex,
+    free: session.free,
+    git: repo ? repo.serialize() : null,
+  });
 }

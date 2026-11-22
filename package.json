@@ -1,7 +1,7 @@
 {
   "name": "pkpilot0013-codeplayground",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "description": "HD2Lab CodePlayground — a reusable in-browser lesson IDE for Python and Git",
   "scripts": {

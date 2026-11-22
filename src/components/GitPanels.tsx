@@ -121,6 +121,7 @@ export function GitStatus({ lang, snap }: GitGraphProps) {
   }
   const rows = [
     ...snap.staged.map((entry) => ({ ...entry, area: 'staged' as const })),
+    ...snap.unmerged.map((path) => ({ path, status: 'unmerged' as const, area: 'unmerged' as const })),
     ...snap.unstaged.map((entry) => ({ ...entry, area: 'unstaged' as const })),
     ...snap.untracked.map((path) => ({ path, status: 'untracked' as const, area: 'untracked' as const })),
   ];
@@ -140,21 +141,37 @@ export function GitStatus({ lang, snap }: GitGraphProps) {
           {rows.map((row) => (
             <li key={`${row.area}-${row.path}`} className={`st-${row.area}`}>
               <span className="st-badge">
-                {row.status === 'added' ? 'A' : row.status === 'deleted' ? 'D' : row.status === 'untracked' ? '?' : 'M'}
+                {row.status === 'added'
+                  ? 'A'
+                  : row.status === 'deleted'
+                    ? 'D'
+                    : row.status === 'untracked'
+                      ? '?'
+                      : row.status === 'unmerged'
+                        ? '!'
+                        : 'M'}
               </span>
               <span className="st-path">{row.path}</span>
               <span className="st-area">
                 {row.area === 'staged'
                   ? t(lang, 'gitStaged')
-                  : row.area === 'unstaged'
-                    ? t(lang, 'gitUnstaged')
-                    : t(lang, 'gitUntracked')}
+                  : row.area === 'unmerged'
+                    ? t(lang, 'gitUnmerged')
+                    : row.area === 'unstaged'
+                      ? t(lang, 'gitUnstaged')
+                      : t(lang, 'gitUntracked')}
               </span>
             </li>
           ))}
         </ul>
       )}
-      {snap.mergePending && <p className="viz-note">{t(lang, 'gitMerging')}: {snap.mergePending}</p>}
+      {snap.mergePending && (
+        <p className="viz-note">
+          {t(lang, 'gitMerging')}: {snap.mergePending}
+          {snap.unmerged.length > 0 ? ` · ${snap.unmerged.length} ${t(lang, 'gitUnmerged')}` : ''}
+        </p>
+      )}
+      {snap.mergePending && !snap.mergeStateAvailable && <p className="viz-error">{t(lang, 'gitMergeLegacy')}</p>}
     </div>
   );
 }

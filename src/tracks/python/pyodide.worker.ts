@@ -10,16 +10,17 @@
  *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms, phase, loadMs }
  *
  * Every run gets a fresh namespace and its own directory inside Pyodide's
- * virtual filesystem, so one run cannot leak variables, files or output into
- * the next — and `main.py` can `import` the lesson's other files. The module
- * table is reset before each run as well (`module-cache.ts`), because an edited
- * module would otherwise stay cached for the rest of the lesson.
+ * virtual filesystem — and both are released again when the run ends
+ * (`runtime-core.ts`), so a lesson run a hundred times leaves neither
+ * directories nor proxies behind. The module table is reset before each run as
+ * well (`module-cache.ts`), because an edited module would otherwise stay
+ * cached for the rest of the lesson.
  *
  * This file is bundled as a classic worker (Vite builds it as an IIFE), which is
  * what lets it use `importScripts` for the Pyodide CDN build.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { PY_RUN_ROOT, moduleResetScript } from './module-cache';
+import { executeProgram, runDirectory, type PyodideLike } from './runtime-core';
 
 const CDN = 'https://cdn.jsdelivr.net/pyodide/v0.28.3/full/';
 
@@ -54,17 +55,6 @@ function loadRuntime(): Promise<any> {
   return loading;
 }
 
-/** Writes the editor's files into the interpreter's virtual filesystem. */
-function writeTree(py: any, dir: string, files: Record<string, string>): void {
-  py.FS.mkdirTree(dir);
-  for (const [name, content] of Object.entries(files)) {
-    const path = `${dir}/${name}`;
-    const parent = path.slice(0, path.lastIndexOf('/'));
-    if (parent && parent !== dir) py.FS.mkdirTree(parent);
-    py.FS.writeFile(path, content);
-  }
-}
-
 scope.onmessage = async (event: any) => {
   const data = event?.data;
   if (!data || data.type !== 'run') return;
@@ -82,25 +72,20 @@ scope.onmessage = async (event: any) => {
   let error: string | undefined;
   let phase: 'load' | 'run' = 'load';
   let loadMs = 0;
+  let py: any = null;
   try {
-    const py = await loadRuntime();
+    py = await loadRuntime();
     loadMs = Date.now() - started;
     phase = 'run';
-    // A private namespace per run: the same name defined twice does not leak.
-    const globals = py.globals.get('dict')();
-    globals.set('__name__', '__main__');
-    globals.set('__file__', entry);
-    writeTree(py, dir, files);
-    py.setStdout({ batched: (text: string) => stdout.push(text) });
-    py.setStderr({ batched: (text: string) => stderr.push(text) });
-    // The interpreter is shared between runs, so its module table is not:
-    // drop the lesson's modules loaded by an earlier run, and the earlier run
-    // directories, so an edited practice.py is really re-imported.
-    py.runPython(moduleResetScript(files, PY_RUN_ROOT));
-    // `import practice` finds the lesson files because the run directory is on
-    // sys.path, and open('data.txt') resolves there too.
-    py.runPython(`import sys, os\nsys.path.insert(0, ${JSON.stringify(dir)})\nos.chdir(${JSON.stringify(dir)})`);
-    await py.runPythonAsync(code, { globals, filename: entry });
+    await executeProgram(py as PyodideLike, {
+      code,
+      files,
+      entry,
+      // The page names the directory; a worker restarted by Stop gets a new one.
+      dir: dir || runDirectory(requestId),
+      onStdout: (text: string) => stdout.push(text),
+      onStderr: (text: string) => stderr.push(text),
+    });
     ok = true;
   } catch (thrown: any) {
     if (phase === 'load') loadMs = Date.now() - started;

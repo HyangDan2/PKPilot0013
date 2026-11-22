@@ -52,6 +52,13 @@ export interface GitSnapshot {
   commits: { sha: string; message: string; parents: string[]; time: number; refs: string[] }[];
   totalCommits: number;
   mergePending: string | null;
+  /** Files whose conflicts are still unresolved — `git commit` must refuse. */
+  unmerged: string[];
+  /**
+   * false only for a merge restored from a save written before the pre-merge
+   * snapshot existed: abort can then reach HEAD but not the exact work tree.
+   */
+  mergeStateAvailable: boolean;
   stats: { commits: number; merges: number; rebases: number };
 }
 
@@ -65,6 +72,11 @@ export interface GitRepoState {
   branches: Record<string, string | null>;
   head: Head;
   mergePending: string | null;
+  /**
+   * Paths still carrying conflict markers. A merge cannot be concluded while
+   * this is non-empty, whatever else is staged at the same time.
+   */
+  unmergedPaths: string[];
   /**
    * The exact state from the moment a merge started (null when no merge is in
    * progress). `git merge --abort` restores it whole, so the learner's staged,
@@ -80,6 +92,20 @@ export interface GitRepoState {
 const AUTHOR = 'HD2Lab Learner <learner@hd2lab.dev>';
 const DEFAULT_BRANCH = 'main';
 const STATE_VERSION = 1;
+
+/** True for a file that still holds a three-way merge conflict block. */
+export const hasConflictMarkers = (content: string): boolean =>
+  /^<<<<<<< /m.test(content) && /^>>>>>>> /m.test(content);
+
+/**
+ * Files in a working tree that still carry conflict markers. Older saves did
+ * not record unresolved paths, so a restored merge reads them back from here.
+ */
+export function conflictPaths(workdir: Record<string, string>): string[] {
+  return Object.keys(workdir)
+    .filter((path) => typeof workdir[path] === 'string' && hasConflictMarkers(workdir[path]))
+    .sort();
+}
 
 const tokenize = (input: string): string[] => {
   const tokens: string[] = [];
@@ -128,6 +154,8 @@ export class GitRepo {
   branches: Record<string, string | null> = {};
   head: Head = { kind: 'branch', name: DEFAULT_BRANCH };
   mergePending: string | null = null;
+  /** Files still holding conflict markers — the merge is not concluded. */
+  unmergedPaths: string[] = [];
   /** Pre-merge state, kept only while a conflicted merge is unresolved. */
   mergeState: GitRepoState | null = null;
   stats = { commits: 0, merges: 0, rebases: 0 };
@@ -157,6 +185,7 @@ export class GitRepo {
       branches: { ...this.branches },
       head: { ...this.head },
       mergePending: this.mergePending,
+      unmergedPaths: [...this.unmergedPaths],
       mergeState: this.mergeState ? (JSON.parse(JSON.stringify(this.mergeState)) as GitRepoState) : null,
       stats: { ...this.stats },
       clock: this.clock,
@@ -174,6 +203,9 @@ export class GitRepo {
     this.branches = copy.branches;
     this.head = copy.head;
     this.mergePending = copy.mergePending;
+    this.unmergedPaths = Array.isArray(copy.unmergedPaths)
+      ? copy.unmergedPaths.filter((path): path is string => typeof path === 'string')
+      : [];
     this.mergeState = copy.mergeState ? (JSON.parse(JSON.stringify(copy.mergeState)) as GitRepoState) : null;
     this.stats = copy.stats;
     this.clock = copy.clock;
@@ -211,6 +243,15 @@ export class GitRepo {
       branches: state.branches as Record<string, string | null>,
       head,
       mergePending: typeof state.mergePending === 'string' ? state.mergePending : null,
+      // A save written before conflicts were tracked keeps the merge and its
+      // markers; the unresolved paths are recovered from the working tree, so
+      // an old session cannot be committed past its conflicts either.
+      unmergedPaths:
+        typeof state.mergePending === 'string'
+          ? Array.isArray(state.unmergedPaths)
+            ? state.unmergedPaths.filter((path): path is string => typeof path === 'string')
+            : conflictPaths(state.workdir as Record<string, string>)
+          : [],
       // Older saves have no snapshot; a merge in progress is still usable, it
       // just aborts back to HEAD instead of the exact pre-merge work tree.
       mergeState:
@@ -314,16 +355,22 @@ export class GitRepo {
   }
 
   unstagedEntries(): StatusEntry[] {
-    if (Object.keys(this.headTree()).length === 0 && Object.keys(this.index).length === 0) return [];
-    // Only files git already tracks can be "modified"; anything else is untracked.
-    const tracked = new Set([...Object.keys(this.index), ...Object.keys(this.headTree())]);
-    return this.statusList(this.index, this.workdir).filter((entry) => tracked.has(entry.path));
+    // Only files in the index can be "not staged for commit"; a file the index
+    // does not hold is untracked, not modified — that is what makes
+    // `git rm --cached` leave a real untracked file behind.
+    const entries: StatusEntry[] = [];
+    for (const path of Object.keys(this.index).sort()) {
+      if (this.unmergedPaths.includes(path)) continue; // shown under "Unmerged paths"
+      if (!(path in this.workdir)) entries.push({ path, status: 'deleted' });
+      else if (this.workdir[path] !== this.index[path]) entries.push({ path, status: 'modified' });
+    }
+    return entries;
   }
 
+  /** Files on disk the index does not track — `git add` is what makes them tracked. */
   untrackedFiles(): string[] {
-    const tracked = new Set([...Object.keys(this.index), ...Object.keys(this.headTree())]);
     return Object.keys(this.workdir)
-      .filter((path) => !tracked.has(path))
+      .filter((path) => !(path in this.index))
       .sort();
   }
 
@@ -366,6 +413,8 @@ export class GitRepo {
         })),
       totalCommits: Object.keys(this.commits).length,
       mergePending: this.mergePending,
+      unmerged: this.mergePending ? [...this.unmergedPaths].sort() : [],
+      mergeStateAvailable: !this.mergePending || this.mergeState !== null,
       stats: { ...this.stats },
     };
   }
@@ -569,8 +618,13 @@ export class GitRepo {
       lines.push(mix('On branch ', { text: this.head.name, tone: 'branch' }));
     }
     if (this.mergePending) {
-      lines.push(out(`You have unmerged paths.`, 'warn'));
-      lines.push(out(`  (fix conflicts and run "git commit")`, 'dim'));
+      if (this.unmergedPaths.length) {
+        lines.push(out(`You have unmerged paths.`, 'warn'));
+        lines.push(out(`  (fix conflicts and run "git commit")`, 'dim'));
+      } else {
+        lines.push(out(`All conflicts fixed but you are still merging.`, 'warn'));
+        lines.push(out(`  (use "git commit" to conclude merge)`, 'dim'));
+      }
     }
     const staged = this.stagedEntries();
     const unstaged = this.unstagedEntries();
@@ -582,6 +636,14 @@ export class GitRepo {
       for (const entry of staged) {
         const label = entry.status === 'added' ? 'new file:  ' : entry.status === 'deleted' ? 'deleted:   ' : 'modified:  ';
         lines.push(mix(`\t${label}`, { text: entry.path, tone: entry.status === 'deleted' ? 'err' : 'ok' }));
+      }
+    }
+    const unmerged = this.mergePending ? [...this.unmergedPaths].sort() : [];
+    if (unmerged.length) {
+      lines.push(blank(), out('Unmerged paths:', 'err'));
+      lines.push(out('  (use "git add <file>..." to mark resolution)', 'dim'));
+      for (const path of unmerged) {
+        lines.push(mix('\tboth modified:   ', { text: path, tone: 'err' }));
       }
     }
     if (unstaged.length) {
@@ -597,9 +659,9 @@ export class GitRepo {
       lines.push(out('  (use "git add <file>..." to include in what will be committed)', 'dim'));
       for (const path of untracked) lines.push(mix('\t', { text: path, tone: 'err' }));
     }
-    if (!staged.length && !unstaged.length && !untracked.length) {
+    if (!staged.length && !unstaged.length && !untracked.length && !unmerged.length) {
       lines.push(blank(), out('nothing to commit, working tree clean', 'plain'));
-    } else if (!staged.length) {
+    } else if (!staged.length && !unmerged.length) {
       lines.push(blank(), out('no changes added to commit (use "git add" and/or "git commit -a")', 'plain'));
     }
     return result(lines);
@@ -633,7 +695,23 @@ export class GitRepo {
       if (path in this.workdir) this.index[path] = this.workdir[path];
       else delete this.index[path];
     }
+    // `git add` is how a learner marks a conflict resolved — the file keeps its
+    // content (markers and all, exactly like real git) and leaves the unmerged
+    // list, which is what lets the merge commit through.
+    this.markResolved(named, stageAll || everything.length > 0, updateOnly);
     return result([]);
+  }
+
+  /** Drops the paths a successful `git add` staged from the unresolved list. */
+  private markResolved(named: string[], everything: boolean, updateOnly: boolean): void {
+    if (this.unmergedPaths.length === 0) return;
+    const tracked = new Set([...Object.keys(this.index), ...Object.keys(this.headTree())]);
+    this.unmergedPaths = this.unmergedPaths.filter((path) => {
+      if (everything) return false;
+      if (named.includes(path)) return false;
+      if (updateOnly && tracked.has(path)) return false;
+      return true;
+    });
   }
 
   /** `add -u` and `commit -a`: only files git already tracks — never untracked ones. */
@@ -690,11 +768,15 @@ export class GitRepo {
     if ((message as string).trim() === '') {
       return fail([out('Aborting commit due to empty commit message.', 'err')]);
     }
+    // An unresolved conflict blocks the commit no matter what else is staged:
+    // `-a` must not sweep conflict markers into a commit either.
+    if (this.unmergedPaths.length) return this.blockedCommit();
     // `-a` stages only after the message has been accepted, so a rejected commit
     // never leaves a half-staged index behind.
     if (stageTracked) this.stageTrackedChanges();
+    if (this.unmergedPaths.length) return this.blockedCommit();
     const staged = this.stagedEntries();
-    if (staged.length === 0) {
+    if (staged.length === 0 && !this.mergePending) {
       const untracked = this.untrackedFiles().length;
       const unstaged = this.unstagedEntries().length;
       const lines = [out('On branch: ' + (this.branch ?? 'HEAD'), 'plain')];
@@ -711,8 +793,9 @@ export class GitRepo {
     const parents: string[] = [];
     const headSha = this.headSha();
     if (this.hasCommit(headSha)) parents.push(headSha);
-    if (this.mergePending) {
-      const otherTip = this.branches[this.mergePending];
+    const mergeSource = this.mergePending;
+    if (mergeSource) {
+      const otherTip = this.mergeTip();
       if (this.hasCommit(otherTip) && !parents.includes(otherTip)) parents.push(otherTip);
     }
     const commit = this.createCommit(message, tree, parents);
@@ -721,8 +804,14 @@ export class GitRepo {
     this.index = { ...tree };
     this.mergePending = null;
     this.mergeState = null;
+    this.unmergedPaths = [];
 
     const lines: OutLine[] = [];
+    if (mergeSource && parents.length > 1) {
+      lines.push(out(`Merge made by the 'ort' strategy.`, 'ok'));
+    } else if (mergeSource) {
+      lines.push(out(`warning: '${mergeSource}' 브랜치를 찾지 못해 일반 커밋으로 기록했습니다.`, 'warn'));
+    }
     lines.push(mix(`[${this.branch ?? 'detached HEAD'} `, { text: commit.sha.slice(0, 7), tone: 'sha' }, `] ${message}`));
     const diffs = diffTrees(parents[0] ? this.commits[parents[0]].tree : {}, tree);
     for (const diff of diffs.filter((entry) => entry.mode !== 'modified')) {
@@ -730,6 +819,22 @@ export class GitRepo {
     }
     lines.push(out(statLine(diffStat(diffs)), 'plain'));
     return result(lines);
+  }
+
+  /** The commit a merge in progress is bringing in. */
+  private mergeTip(): string | null {
+    if (!this.mergePending) return null;
+    return this.branches[this.mergePending] ?? this.mergeState?.branches[this.mergePending] ?? null;
+  }
+
+  private blockedCommit(): CommandResult {
+    const paths = [...this.unmergedPaths].sort();
+    return fail([
+      out('error: Committing is not possible because you have unmerged files.', 'err'),
+      out(`hint: Fix them up in the work tree, and then use 'git add <file>' to mark resolution.`, 'dim'),
+      ...paths.map((path) => out(`\t${path}`, 'err')),
+      out('fatal: Exiting because of an unresolved conflict.', 'err'),
+    ]);
   }
 
   private cmdBranch(args: string[]): CommandResult {
@@ -951,22 +1056,40 @@ export class GitRepo {
     if (args.includes('--abort')) {
       if (!this.mergePending) return fail([out('fatal: There is no merge to abort (MERGE_HEAD missing).', 'err')]);
       const snapshot = this.mergeState;
+      const conflicted = [...this.unmergedPaths];
       this.mergePending = null;
       this.mergeState = null;
+      this.unmergedPaths = [];
       if (snapshot) {
         // Put back everything the learner had when the merge started — the
         // staged work, the unstaged edits and the untracked files — not just HEAD.
         this.restore(snapshot);
         this.mergePending = null;
         this.mergeState = null;
+        this.unmergedPaths = [];
         return result([
           out('Merge aborted.', 'warn'),
           out('병합을 시작하기 전의 파일과 스테이징 상태로 되돌렸습니다.', 'dim'),
         ]);
       }
-      this.workdir = { ...this.headTree() };
-      this.index = { ...this.headTree() };
-      return result([out('Merge aborted.', 'warn')]);
+      // A merge restored from an older save has no pre-merge snapshot: only HEAD
+      // can be reached again. Keep every file the merge did not create — an
+      // untracked file is the learner's own work and must survive the abort.
+      const head = this.headTree();
+      const workdir: Record<string, string> = { ...head };
+      for (const [path, content] of Object.entries(this.workdir)) {
+        if (path in head) continue;
+        if (conflicted.includes(path)) continue;
+        workdir[path] = content;
+      }
+      this.workdir = workdir;
+      this.index = { ...head };
+      return result([
+        out('Merge aborted.', 'warn'),
+        out('warning: 이 병합은 병합 직전 상태를 저장하지 않은 예전 세션에서 복구되었습니다.', 'warn'),
+        out('warning: HEAD로만 되돌리며, 커밋하지 않은 스테이징·편집 내용은 복원되지 않을 수 있습니다.', 'warn'),
+        out('warning: 커밋하지 않은 새 파일은 그대로 두었습니다.', 'dim'),
+      ]);
     }
     if (this.mergePending) {
       return fail([
@@ -980,6 +1103,7 @@ export class GitRepo {
       return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
     }
     if (this.branch === name) return result([out('Already up to date.', 'plain')]);
+    this.unmergedPaths = [];
     const ourSha = this.headSha();
     const theirSha = this.branches[name];
     if (!this.hasCommit(theirSha)) return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
@@ -994,6 +1118,7 @@ export class GitRepo {
       const plan = this.localChangePlan(theirs.tree);
       if (plan.blocked.length) return this.blockedMerge(plan.blocked);
       this.applyTree(theirs.tree);
+      this.unmergedPaths = [];
       if (this.branch) this.branches[this.branch] = theirSha as string;
       else this.head = { kind: 'detached', sha: theirSha as string };
       return result([
@@ -1034,11 +1159,13 @@ export class GitRepo {
       }
       this.workdir = workdir;
       this.mergePending = name;
+      this.unmergedPaths = [...conflicts].sort();
       this.mergeState = snapshot;
       return fail(lines);
     }
     this.applyTree(tree);
     this.mergeState = null;
+    this.unmergedPaths = [];
     const commit = this.createCommit(`Merge branch '${name}'`, tree, [ourSha, theirSha as string]);
     if (this.branch) this.branches[this.branch] = commit.sha;
     const diffs = diffTrees(this.commits[ourSha].tree, tree);
@@ -1166,6 +1293,7 @@ export class GitRepo {
       this.index = { ...tree };
       this.mergePending = null;
       this.mergeState = null;
+      this.unmergedPaths = [];
       lines.push(out(`HEAD is now at ${sha.slice(0, 7)} ${this.commits[sha].message}`, 'ok'));
     } else if (!soft) {
       this.index = { ...tree };
@@ -1332,9 +1460,12 @@ export class GitRepo {
     // Without this, one `git rm` after a long edit silently threw that edit away.
     if (!force) {
       const head = this.headTree();
-      const staged = paths.filter((path) => this.index[path] !== head[path]);
+      // A conflicted path is exactly what `git rm` may settle as a deletion —
+      // the marker content in the work tree is not work to protect.
+      const resolvable = (path: string) => !this.unmergedPaths.includes(path);
+      const staged = paths.filter((path) => resolvable(path) && this.index[path] !== head[path]);
       const local = paths.filter(
-        (path) => this.index[path] === head[path] && this.workdir[path] !== this.index[path],
+        (path) => resolvable(path) && this.index[path] === head[path] && this.workdir[path] !== this.index[path],
       );
       if (staged.length || local.length) {
         const lines: OutLine[] = [];
@@ -1363,6 +1494,9 @@ export class GitRepo {
       if (!cached) delete this.workdir[path];
       lines.push(out(`rm '${path}'`, 'plain'));
     }
+    // `git rm` on a conflicted path settles it as a deletion — real git's way
+    // out of a "delete/modify" conflict.
+    this.unmergedPaths = this.unmergedPaths.filter((path) => !paths.includes(path));
     return result(lines);
   }
 
