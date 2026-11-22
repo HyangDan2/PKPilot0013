@@ -86,7 +86,18 @@ const ko = {
   gitStaged: '스테이징됨',
   gitUnstaged: '수정됨',
   gitUntracked: '추적 안 됨',
+  gitUnmerged: '충돌 미해결',
   gitMerging: '병합 진행 중',
+  gitMergeLegacy:
+    '예전 저장 형식에서 복구된 병합입니다. git merge --abort 는 HEAD로만 되돌리며, 병합 직전에 하던 작업은 복원되지 않을 수 있습니다.',
+
+  syncConflictTitle: '다른 탭에서 이 강의를 수정했습니다',
+  syncConflictBody: '이 탭에 저장하지 않은 작업이 있습니다. 덮어쓰면 다른 탭의 최근 작업이 사라집니다.',
+  syncKeepMine: '이 탭 내용으로 저장',
+  syncLoadTheirs: '다른 탭 내용 불러오기',
+  syncAdopted: '다른 탭의 변경을 불러왔습니다',
+  syncKept: '이 탭의 내용으로 저장했습니다',
+  syncDropped: '다른 탭의 내용을 불러왔습니다',
 
   missionCurrent: '진행 중인 미션',
   missionComplete: '모든 미션을 완료했습니다!',
@@ -213,7 +224,18 @@ const en: Dict = {
   gitStaged: 'Staged',
   gitUnstaged: 'Modified',
   gitUntracked: 'Untracked',
+  gitUnmerged: 'Unresolved conflict',
   gitMerging: 'Merge in progress',
+  gitMergeLegacy:
+    'This merge was restored from an older save. git merge --abort can only return to HEAD, so work you were doing just before the merge may not come back.',
+
+  syncConflictTitle: 'This lesson was changed in another tab',
+  syncConflictBody: 'This tab has unsaved work. Overwriting it discards the other tab’s latest changes.',
+  syncKeepMine: 'Save this tab',
+  syncLoadTheirs: 'Load the other tab',
+  syncAdopted: 'Loaded the changes from the other tab',
+  syncKept: 'Saved this tab’s work',
+  syncDropped: 'Loaded the other tab’s work',
 
   missionCurrent: 'Active mission',
   missionComplete: 'Every mission is complete!',

@@ -2087,3 +2087,83 @@ img {
     display: none;
   }
 }
+
+/* Another tab has a newer copy of this lesson (WO-15). A fixed card, so it
+   never moves the workspace grid it appears over. */
+.sync-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 74px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  max-width: min(680px, calc(100vw - 28px));
+  padding: 12px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  z-index: 70;
+}
+.sync-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 200px;
+  flex: 1 1 260px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sync-text b {
+  color: var(--warn);
+  font-size: 12.5px;
+}
+.sync-text span {
+  color: var(--muted);
+}
+.sync-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.sync-actions button {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-veil);
+  color: var(--accent-deep);
+  font-size: 12px;
+  font-weight: 600;
+}
+.sync-actions button:first-child {
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.st-unmerged .st-badge {
+  background: var(--error);
+  color: #fff;
+}
+.st-unmerged .st-path {
+  color: var(--error);
+  font-weight: 600;
+}
+
+@media (max-width: 480px) {
+  .sync-banner {
+    bottom: 62px;
+    padding: 10px 12px;
+  }
+  .sync-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+  .sync-actions button {
+    flex: 1;
+  }
+}

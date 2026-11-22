@@ -64,9 +64,17 @@ export const SESSION_VERSION = 3;
 
 const sessionKey = (lessonId: string) => `codeplayground:session:v${SESSION_VERSION}:${lessonId}`;
 const legacyProgressKey = (lessonId: string) => `visna-sol:progress:${lessonId}`;
+const channelName = (lessonId: string) => `codeplayground:session-sync:v${SESSION_VERSION}:${lessonId}`;
 
 interface PersistedSession {
   version: number;
+  /**
+   * Bumped by every write. A tab remembers the revision it read, so a write
+   * that would roll over another tab's newer save is caught instead of done.
+   */
+  revision: number;
+  /** When the stored copy was last written (ms since the epoch). */
+  updatedAt: number;
   files: Record<string, string>;
   active: string;
   done: string[];
@@ -74,6 +82,22 @@ interface PersistedSession {
   free: boolean;
   git: GitRepoState | null;
   savedAt: number;
+}
+
+/** What another tab already has, when this tab is behind it. */
+export interface SaveConflict {
+  revision: number;
+  updatedAt: number;
+}
+
+export type SaveResult = { ok: true; revision: number; updatedAt: number } | { ok: false; conflict: SaveConflict };
+
+/** One tab telling the others that the stored session moved on. */
+export interface SessionChange {
+  revision: number;
+  updatedAt: number;
+  /** Where the notice came from — used to skip this tab's own echo. */
+  source: 'broadcast' | 'storage';
 }
 
 const storage = (): Storage | null => {
@@ -103,6 +127,14 @@ export function readSavedSession(lessonId: string): PersistedSession | null {
     const done = Array.isArray(parsed.done) ? parsed.done.filter((id): id is string => typeof id === 'string') : [];
     return {
       version: SESSION_VERSION,
+      // A save written before revisions existed is revision 0 — still readable,
+      // and the next write simply starts counting from there.
+      revision: Number.isFinite(parsed.revision) ? Number(parsed.revision) : 0,
+      updatedAt: Number.isFinite(parsed.updatedAt)
+        ? Number(parsed.updatedAt)
+        : Number.isFinite(parsed.savedAt)
+          ? Number(parsed.savedAt)
+          : 0,
       files: parsed.files,
       active: Object.keys(parsed.files).length > 0 ? parsed.active : '',
       done,
@@ -116,24 +148,141 @@ export function readSavedSession(lessonId: string): PersistedSession | null {
   }
 }
 
-export function writeSavedSession(lessonId: string, session: Session, repo: GitRepo | null): void {
+/** Revision of the stored copy, 0 when there is none. */
+export function storedRevision(lessonId: string): number {
+  return readSavedSession(lessonId)?.revision ?? 0;
+}
+
+export interface WriteOptions {
+  /** The revision this tab read — a newer stored copy makes the write refuse. */
+  baseRevision?: number;
+  /** The learner chose to overwrite the other tab's copy. */
+  force?: boolean;
+}
+
+/**
+ * Saves the session unless another tab has written a newer revision than the
+ * one this tab is working from. Refusing is the point: an unseen newer copy
+ * must never be overwritten silently.
+ */
+export function writeSavedSession(
+  lessonId: string,
+  session: Session,
+  repo: GitRepo | null,
+  options: WriteOptions = {},
+): SaveResult {
   const store = storage();
-  if (!store) return;
+  const now = Date.now();
+  if (!store) return { ok: true, revision: options.baseRevision ?? 0, updatedAt: now };
+  const stored = readSavedSession(lessonId);
+  const current = stored?.revision ?? 0;
+  const base = options.baseRevision;
+  if (!options.force && base !== undefined && current > base) {
+    return { ok: false, conflict: { revision: current, updatedAt: stored?.updatedAt ?? 0 } };
+  }
+  const revision = Math.max(current, base ?? 0) + 1;
   const payload: PersistedSession = {
     version: SESSION_VERSION,
+    revision,
+    updatedAt: now,
     files: session.files,
     active: session.active,
     done: session.done,
     missionIndex: session.missionIndex,
     free: session.free,
     git: repo ? repo.serialize() : null,
-    savedAt: Date.now(),
+    savedAt: now,
   };
   try {
     store.setItem(sessionKey(lessonId), JSON.stringify(payload));
   } catch {
     /* a full or blocked storage must not break the lesson */
+    return { ok: true, revision, updatedAt: now };
   }
+  announce(lessonId, { revision, updatedAt: now });
+  return { ok: true, revision, updatedAt: now };
+}
+
+// ── telling the other tabs ──────────────────────────────────────────────────
+const listeners = new Map<string, Set<(change: SessionChange) => void>>();
+const channels = new Map<string, BroadcastChannel>();
+let storageBound = false;
+
+function channel(lessonId: string): BroadcastChannel | null {
+  if (typeof BroadcastChannel === 'undefined') return null;
+  const existing = channels.get(lessonId);
+  if (existing) return existing;
+  try {
+    const created = new BroadcastChannel(channelName(lessonId));
+    created.onmessage = (event: MessageEvent) => {
+      const data = event.data as Partial<SessionChange> | null;
+      if (!data || typeof data.revision !== 'number') return;
+      deliver(lessonId, { revision: data.revision, updatedAt: Number(data.updatedAt ?? 0), source: 'broadcast' });
+    };
+    channels.set(lessonId, created);
+    return created;
+  } catch {
+    return null;
+  }
+}
+
+function deliver(lessonId: string, change: SessionChange): void {
+  for (const listener of [...(listeners.get(lessonId) ?? [])]) {
+    try {
+      listener(change);
+    } catch {
+      /* a listener must never break saving */
+    }
+  }
+}
+
+function announce(lessonId: string, change: { revision: number; updatedAt: number }): void {
+  try {
+    channel(lessonId)?.postMessage({ ...change, source: 'broadcast' });
+  } catch {
+    /* no channel: the storage event still tells the other tabs */
+  }
+}
+
+/** A `storage` event carries the same news when BroadcastChannel is unavailable. */
+function bindStorage(): void {
+  if (storageBound || typeof window === 'undefined' || !window.addEventListener) return;
+  storageBound = true;
+  window.addEventListener('storage', (event: StorageEvent) => {
+    if (!event.key || !event.newValue) return;
+    for (const lessonId of listeners.keys()) {
+      if (event.key !== sessionKey(lessonId)) continue;
+      try {
+        const parsed = JSON.parse(event.newValue) as Partial<PersistedSession>;
+        if (typeof parsed.revision !== 'number') return;
+        deliver(lessonId, {
+          revision: parsed.revision,
+          updatedAt: Number(parsed.updatedAt ?? parsed.savedAt ?? 0),
+          source: 'storage',
+        });
+      } catch {
+        /* someone else's key with our prefix — ignore */
+      }
+    }
+  });
+}
+
+/** Listens for a newer stored session from another tab. Returns the unsubscribe. */
+export function subscribeToSessionChanges(
+  lessonId: string,
+  listener: (change: SessionChange) => void,
+): () => void {
+  bindStorage();
+  channel(lessonId);
+  const set = listeners.get(lessonId) ?? new Set<(change: SessionChange) => void>();
+  set.add(listener);
+  listeners.set(lessonId, set);
+  return () => {
+    const current = listeners.get(lessonId);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) listeners.delete(lessonId);
+  };
 }
 
 export function clearSavedSession(lessonId: string): void {
@@ -160,7 +309,12 @@ export function readLegacyProgress(lessonId: string): string[] {
 }
 
 /** The starting point of a lesson: restored work if there is any, else the markdown. */
-export function bootstrapSession(lesson: Lesson): { session: Session; repo: GitRepo | null } {
+export function bootstrapSession(lesson: Lesson): {
+  session: Session;
+  repo: GitRepo | null;
+  /** The stored revision this session was read from (0 when nothing was stored). */
+  revision: number;
+} {
   const saved = readSavedSession(lesson.id);
   const files = saved ? { ...saved.files } : { ...lesson.files };
   const active = saved && saved.active in files ? saved.active : lesson.entry in files ? lesson.entry : Object.keys(files).sort()[0] ?? '';
@@ -188,7 +342,7 @@ export function bootstrapSession(lesson: Lesson): { session: Session; repo: GitR
     lastRun: null,
     gitSnap: repo ? repo.snapshot() : null,
   };
-  return { session, repo };
+  return { session, repo, revision: saved?.revision ?? 0 };
 }
 
 /**

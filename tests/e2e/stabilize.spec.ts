@@ -384,3 +384,107 @@ test.describe('WO-11 · Python runs belong to their source', () => {
     await expect(page.getByTestId('py-stale')).toHaveCount(0);
   });
 });
+
+/**
+ * Third stabilisation round (v2.2.0 · WO-13 … WO-17): the conflict state a merge
+ * leaves behind, two tabs on one lesson, and `git rm --cached`.
+ */
+test.describe('WO-13 · a conflicted merge is a state', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('@smoke refuses the merge commit until the conflict is resolved', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openGit(page);
+    await page.getByTestId('tab-hello.txt').click();
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+
+    await run(page, 'git switch -c feature');
+    await page.getByTestId('code-area').fill('feature 쪽\n');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "feature 작업"');
+
+    await run(page, 'git switch main');
+    await page.getByTestId('code-area').fill('main 쪽\n');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "main 작업"');
+
+    await run(page, 'git merge feature');
+    await expect(page.getByTestId('code-area')).toHaveValue(/<<<<<<< HEAD/);
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('충돌 미해결');
+    await run(page, 'git status');
+    await expect(page.getByTestId('terminal')).toContainText('Unmerged paths:');
+
+    // another staged file must not let the merge commit through
+    await page.getByTestId('tab-notes.md').click();
+    await page.getByTestId('code-area').fill('# 병합 중 메모\n');
+    await run(page, 'git add notes.md');
+    await page.getByTestId('tab-hello.txt').click();
+    await run(page, 'git commit -m "merge"');
+    await expect(page.getByTestId('terminal')).toContainText('unmerged files');
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('충돌 미해결');
+
+    // resolving with git add concludes the merge
+    await page.getByTestId('code-area').fill('main 쪽 + feature 쪽\n');
+    await run(page, 'git add hello.txt');
+    await run(page, 'git commit -m "merge feature"');
+    await expect(page.getByTestId('terminal')).toContainText('Merge made by the');
+    await expect(page.locator('[data-panel="working-tree"]')).not.toContainText('충돌 미해결');
+    await run(page, 'git log --oneline');
+    await expect(page.getByTestId('terminal')).toContainText('merge feature');
+    expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+});
+
+test.describe('WO-15 · two tabs on the same lesson', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('@smoke a clean tab follows the tab that is being edited', async ({ page, context }) => {
+    await openGit(page);
+    await page.getByTestId('tab-README.md').click();
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+    await page.getByTestId('code-area').fill('# 첫 탭에서 쓴 내용\n');
+    await page.waitForTimeout(600); // the debounced save
+
+    // the second tab opens the same lesson and settles on the stored copy
+    const second = await context.newPage();
+    await second.goto(page.url());
+    await second.getByTestId('tab-README.md').click();
+    await expect(second.getByTestId('code-area')).toHaveValue('# 첫 탭에서 쓴 내용\n');
+    await second.waitForTimeout(600);
+
+    // the first tab saves again; the second has nothing unsaved, so it follows
+    await page.getByTestId('code-area').fill('# 첫 탭에서 다시 고침\n');
+    await expect(second.getByTestId('code-area')).toHaveValue('# 첫 탭에서 다시 고침\n', { timeout: 10_000 });
+    await expect(second.getByTestId('sync-conflict')).toHaveCount(0);
+    await expect(page.getByTestId('sync-conflict')).toHaveCount(0);
+  });
+});
+
+test.describe('WO-17 · git rm --cached keeps the file', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('@smoke stops tracking the file but leaves it on disk as untracked', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openGit(page);
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+
+    await run(page, 'git rm --cached README.md');
+    // the file is still there, and now untracked
+    await page.getByTestId('side-tab-files').click();
+    await expect(page.getByTestId('file-README.md')).toBeVisible();
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('추적 안 됨');
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('스테이징됨');
+
+    await run(page, 'git commit -m "README 추적 해제"');
+    await expect(page.getByTestId('file-README.md')).toBeVisible();
+    await run(page, 'git status');
+    await expect(page.getByTestId('terminal')).toContainText('Untracked files:');
+    expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+});

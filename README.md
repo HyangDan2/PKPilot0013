@@ -115,6 +115,30 @@ A second pass (WO-07 … WO-12) tightened four more edges:
 - **An empty workspace is a working workspace.** Every file can be removed (or `git rm`-ed) down to
   zero; that state is saved, restored, and a new file created from it opens straight in the editor.
 
+A third pass (WO-13 … WO-17) closed the remaining correctness gaps:
+
+- **A conflicted merge is a state, not a hint.** The repository records the paths that still hold
+  conflicts (`unmergedPaths`), `git status` lists them under *Unmerged paths*, and `git commit`
+  refuses while any remain — even when other files are staged, and even with `-a`, which must not
+  sweep conflict markers into a commit. `git add` (or `git rm`) on a path is what resolves it; the
+  commit that concludes the merge really has two parents. The unresolved state survives save,
+  reload and abort.
+- **A Python run leaves nothing behind.** Each run's directory is removed from Pyodide's in-memory
+  file system in a `finally`, and both PyProxy objects it creates (the namespace dict and the bound
+  `dict` factory) are destroyed, so the cost of a lesson does not grow with the number of runs
+  (`tools/measure-python-memory.mjs`, 120 runs: 0 directories and 0 MiB of wasm heap).
+- **Two tabs never overwrite each other silently.** The saved session carries a `revision` and an
+  `updatedAt`; a tab writes only from the revision it read, another tab's newer save arrives over
+  `BroadcastChannel` (or a `storage` event), and a tab with unsaved work shows a conflict card —
+  *save this tab* or *load the other tab* — instead of racing. A tab with nothing unsaved simply
+  follows. Restoring a session on load is unchanged.
+- **An older saved session still opens.** A merge saved by a build that had no revisions and no
+  pre-merge snapshot is recovered from its conflict markers, still refuses to be committed past, and
+  `git merge --abort` warns that it can only reach HEAD while keeping the learner's untracked files.
+- **`git rm --cached` matches real git.** The index entry goes, the file stays on disk as an
+  untracked file: `git status` shows the staged deletion *and* the untracked file, and `git add`
+  puts it back under version control.
+
 The Git lesson's "이 실습 엔진이 단순화한 부분" section lists what the teaching engine deliberately
 simplifies (whole-tree snapshots, file-level merge, 8-character hashes, no stash/reflog/remote).
 
@@ -128,6 +152,10 @@ npm run build      # tsc --noEmit && vite build
 npm run preview    # http://localhost:4173/PKPilot0013/
 npm run test:e2e   # Playwright: catalog → lesson → run, branch switch, reload, stop, 390/1440
 ```
+
+`tools/measure-python-memory.mjs` measures the cost of a Python lesson over many runs against a
+real Pyodide in Node (see the file's header for the two commands); `--legacy` reproduces the
+pre-WO-14 lifecycle so the difference is visible.
 
 `PK13_PORT` moves the preview server when 4173 is taken; `PK13_BASE` points the suite at an already
 running server (the live site, for example). `--grep @smoke` runs the subset CI requires: those
@@ -152,8 +180,10 @@ src/
     git/diff.ts        unified diff + LCS
     python/runner.ts   Pyodide in a Web Worker: one run at a time, ids, stop,
                        separate load/run limits, retry
-    python/pyodide.worker.ts  the interpreter itself (fresh namespace + VFS per run)
-    python/module-cache.ts    clears the lesson's modules so an edit is re-imported
+    python/pyodide.worker.ts  the interpreter itself (message plumbing + runtime loading)
+    python/runtime-core.ts    one run: namespace, VFS directory, module reset, always-cleaned-up
+    python/module-cache.ts    clears the lesson's modules so an edit is re-imported,
+                       and the VFS cleanup Python
   state/session.ts     projection of the working tree, save/restore policy
   state/lesson-state.ts what a mission check may see (and when a run is stale)
   state/useSandbox.ts  lesson ↔ engines ↔ React session, progress persistence
