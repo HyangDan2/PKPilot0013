@@ -15,7 +15,7 @@ panels: [output]
 entry: main.py
 files:
   main.py: |
-    # Vísna Sól · Python 기초
+    # CodePlayground · Python 기초
     # 실행: Ctrl+Enter 또는 오른쪽 위 실행 버튼
 
     name = "학습자"
@@ -45,16 +45,16 @@ missions:
       ko: 변수로 나를 소개하기
       en: Introduce yourself with a variable
     goal:
-      ko: name 값을 Vísna Sól 로 바꾸고 f-문자열로 인사 문장을 출력해 보세요.
-      en: Set name to Vísna Sól and print a greeting with an f-string.
+      ko: name 값을 CodePlayground로 바꾸고 f-문자열로 인사 문장을 출력해 보세요.
+      en: Set name to CodePlayground and print a greeting with an f-string.
     hint:
-      ko: main.py 의 name = "학습자" 를 name = "Vísna Sól" 로 고친 뒤 실행하세요. 출력은 "안녕하세요, Vísna Sól입니다." 가 되어야 합니다.
-      en: Change name = "학습자" to name = "Vísna Sól" and run again. The output should read "안녕하세요, Vísna Sól입니다.".
+      ko: main.py 의 name = "학습자" 를 name = "CodePlayground"로 고친 뒤 실행하세요. 출력은 "안녕하세요, CodePlayground입니다." 가 되어야 합니다.
+      en: Change name = "학습자" to name = "CodePlayground" and run again. The output should read "안녕하세요, CodePlayground입니다.".
     check:
       - type: stdout-contains
-        value: '안녕하세요, Vísna Sól'
+        value: '안녕하세요, CodePlayground'
       - type: file-contains
-        value: 'name = "Vísna Sól"'
+        value: 'name = "CodePlayground"'
   - id: py-loop
     title:
       ko: 반복문으로 1부터 5까지

@@ -5,6 +5,8 @@ import { TopBar } from './components/TopBar';
 import { Landing } from './components/Landing';
 import { LessonWorkspace } from './components/LessonWorkspace';
 
+// Legacy storage keys from before the rename — kept so saved language, theme and
+// lesson progress still resolve after a visit to the renamed build.
 const LANG_KEY = 'visna-sol:lang';
 const THEME_KEY = 'visna-sol:theme';
 const LESSON_HASH = /^#\/lesson\/([A-Za-z0-9_-]+)/;

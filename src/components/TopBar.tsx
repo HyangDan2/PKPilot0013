@@ -24,7 +24,7 @@ export function TopBar({ lang, onLang, theme, onTheme, onHome, onResetFiles, onC
         <span className="mark" aria-hidden />
         <span className="brand-name">HD2Lab</span>
         <span className="brand-pipe" aria-hidden />
-        <span className="brand-app">Vísna Sól</span>
+        <span className="brand-app">CodePlayground</span>
       </button>
 
       <div className="topbar-actions">

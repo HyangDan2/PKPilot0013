@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PKPilot0013 · Vísna Sól — HD2Lab brand asset generator (Soft Iris)
+PKPilot0013 · CodePlayground — HD2Lab brand asset generator (Soft Iris)
 ===================================================================
 Builds the official asset set out of the same dual-skew mark the app header
 draws in CSS:
@@ -11,7 +11,7 @@ draws in CSS:
 
 The OG card follows the Shutterplate / Nordlys card layout — Soft Iris grid,
 white container, kicker + privacy mark, dual-skew lockup, two-line headline,
-sub copy, three tiles and a footer rail — filled with Vísna Sól content.
+sub copy, three tiles and a footer rail — filled with CodePlayground content.
 
     python3 tools/generate_brand_assets.py [--font PATH] [--out DIR]
 """
@@ -144,8 +144,8 @@ def build_icons(out_dir: str):
 
 
 MANIFEST = {
-    "name": "HD2Lab Vísna Sól",
-    "short_name": "Vísna Sól",
+    "name": "HD2Lab CodePlayground",
+    "short_name": "CodePlayground",
     "description": "마크다운 강의를 읽고 Python·Git을 브라우저에서 직접 실행하며 배우는 HD2Lab 기초 강의 IDE. "
                    "Pyodide 파이썬, 커밋 그래프 — 설치 0, 업로드 0 B.",
     "lang": "ko",
@@ -202,10 +202,10 @@ def build_og(out_dir: str) -> str:
     # 2) kicker + privacy mark
     r = 5 * S
     d.ellipse((104 * S - r, 90 * S - r, 104 * S + r, 90 * S + r), fill=PURPLE)
-    spaced(d, (124 * S, 96 * S), "13 / LESSON IDE · VÍSNA SÓL", font(14 * S, "Medium"), MUTED, spacing=2.2 * S)
+    spaced(d, (124 * S, 96 * S), "13 / LESSON IDE · CODEPLAYGROUND", font(14 * S, "Medium"), MUTED, spacing=2.2 * S)
     d.text((1096 * S, 96 * S), "100% CLIENT-SIDE · 0 B UPLOAD", font=mono(13 * S), fill=DIM, anchor="rs")
 
-    # 3) dual-skew mark + HD2Lab | Vísna Sól
+    # 3) dual-skew mark + HD2Lab | CodePlayground
     mark = render_svg(MARK_SVG, 100 * S)
     img.paste(mark, (84 * S, 120 * S), mark)
 
@@ -214,7 +214,7 @@ def build_og(out_dir: str) -> str:
     d.text((224 * S, base_y * S), "HD2Lab", font=f_title, fill=INK, anchor="ls")
     pipe_x = 224 * S + d.textlength("HD2Lab", font=f_title) + 18 * S
     d.line([(pipe_x, (base_y - 40) * S), (pipe_x, (base_y + 2) * S)], fill="#D9D2EE", width=int(2.5 * S))
-    d.text((pipe_x + 20 * S, base_y * S), "Vísna Sól", font=f_title, fill=PURPLE, anchor="ls")
+    d.text((pipe_x + 20 * S, base_y * S), "CodePlayground", font=f_title, fill=PURPLE, anchor="ls")
 
     # 4) headline + sub copy
     f_head = font(48 * S, "Bold")
@@ -250,7 +250,7 @@ def build_og(out_dir: str) -> str:
 
     # 6) footer rail
     d.line([(104 * S, 566 * S), (1096 * S, 566 * S)], fill=LINE, width=int(1 * S))
-    spaced(d, (104 * S, 588 * S), "VÍSNA SÓL · HD2LAB LESSON IDE", font(11.5 * S, "Medium"), MUTED, spacing=1.5 * S)
+    spaced(d, (104 * S, 588 * S), "CODEPLAYGROUND · HD2LAB LESSON IDE", font(11.5 * S, "Medium"), MUTED, spacing=1.5 * S)
     d.text((1096 * S, 588 * S), "hyangdan2.github.io/PKPilot0013", font=mono(11.5 * S), fill=DIM, anchor="rs")
 
     out = img.resize((1200, 630), Image.LANCZOS)
@@ -263,7 +263,7 @@ def build_og(out_dir: str) -> str:
 def main() -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="PKPilot0013 (Vísna Sól) 브랜드 에셋 생성")
+    ap = argparse.ArgumentParser(description="PKPilot0013 (CodePlayground) 브랜드 에셋 생성")
     ap.add_argument("--font")
     ap.add_argument("--out", default=os.path.join(ROOT, "public"))
     args = ap.parse_args()

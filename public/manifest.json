@@ -1,6 +1,6 @@
 {
-  "name": "HD2Lab Vísna Sól",
-  "short_name": "Vísna Sól",
+  "name": "HD2Lab CodePlayground",
+  "short_name": "CodePlayground",
   "description": "마크다운 강의를 읽고 Python·Git을 브라우저에서 직접 실행하며 배우는 HD2Lab 기초 강의 IDE. Pyodide 파이썬, 커밋 그래프 — 설치 0, 업로드 0 B.",
   "lang": "ko",
   "dir": "ltr",

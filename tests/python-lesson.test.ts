@@ -53,9 +53,9 @@ describe.skipIf(!hasPython)('Python lesson code, executed for real', () => {
   });
 
   it('passes the name mission once the learner edits name', () => {
-    const code = 'name = "Vísna Sól"\nprint(f"안녕하세요, {name}입니다.")';
+    const code = 'name = "CodePlayground"\nprint(f"안녕하세요, {name}입니다.")';
     const stdout = run(code);
-    expect(stdout.trim()).toBe('안녕하세요, Vísna Sól입니다.');
+    expect(stdout.trim()).toBe('안녕하세요, CodePlayground입니다.');
     expect(check('py-name', stateFor(code, stdout))).toBe(true);
   });
 

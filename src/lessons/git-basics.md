@@ -15,7 +15,7 @@ panels: [git-graph, working-tree]
 entry: README.md
 files:
   README.md: |
-    # Vísna Sól · Git 기초 실습 저장소
+    # CodePlayground · Git 기초 실습 저장소
 
     이 폴더는 Git 을 손으로 익히는 공간입니다.
     아래 순서대로 진행해 보세요.
