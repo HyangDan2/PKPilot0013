@@ -122,14 +122,70 @@ describe('Python runtime protocol', () => {
     await expect(next).resolves.toMatchObject({ ok: true, stdout: '2' });
   });
 
-  it('kills a run that exceeds its timeout', async () => {
+  it('kills a program that exceeds its own limit', async () => {
     const created = useFakeWorkers();
     vi.useFakeTimers();
     const pending = runPython('while True: pass', {}, 'main.py', { timeoutMs: 500 });
+    // The runtime is up, so only the program's clock is running.
+    created[0].send({ type: 'progress', stage: 'ready', percent: 100 });
     await vi.advanceTimersByTimeAsync(501);
-    await expect(pending).resolves.toMatchObject({ ok: false, stoppedBy: 'timeout' });
+    await expect(pending).resolves.toMatchObject({ ok: false, stoppedBy: 'timeout', phase: 'run' });
     expect(created[0].terminated).toBeGreaterThan(0);
     expect(isPythonBusy()).toBe(false);
+  });
+
+  it('gives a cold runtime its own longer limit than the program', async () => {
+    const created = useFakeWorkers();
+    vi.useFakeTimers();
+    const pending = runPython('print(1)', {}, 'main.py', { timeoutMs: 500, loadTimeoutMs: 5_000 });
+
+    // Loading for longer than the program limit must not be reported as the
+    // program running too long.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(isPythonBusy()).toBe(true);
+
+    created[0].send({ type: 'progress', stage: 'ready', percent: 100 });
+    await vi.advanceTimersByTimeAsync(501);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: 'timeout', phase: 'run' });
+  });
+
+  it('reports a runtime that never loads as a load timeout, not a program error', async () => {
+    const created = useFakeWorkers();
+    vi.useFakeTimers();
+    const pending = runPython('print(1)', {}, 'main.py', { timeoutMs: 20_000, loadTimeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: 'load-timeout',
+      stoppedBy: 'timeout',
+      phase: 'load',
+    });
+    expect(created[0].terminated).toBeGreaterThan(0);
+    // A failed load is a runtime problem: the output card shows the offline note
+    // and the next attempt starts from a cold worker.
+    expect(pythonStatus().stage).toBe('error');
+    const retry = runPython('print(1)', {}, 'main.py');
+    expect(workers).toHaveLength(2);
+    expect(isPythonBusy()).toBe(true);
+    workers[1].send({ type: 'progress', stage: 'ready', percent: 100 });
+    workers[1].send({ type: 'done', requestId: workers[1].lastRequestId, ok: true, stdout: '1', stderr: '', ms: 9, loadMs: 4 });
+    await expect(retry).resolves.toMatchObject({ ok: true, stdout: '1', ms: 5, loadMs: 4 });
+  });
+
+  it('separates the runtime download time from the program time', async () => {
+    const created = useFakeWorkers();
+    const pending = runPython('print(1)', {}, 'main.py');
+    created[0].send({ type: 'progress', stage: 'ready', percent: 100 });
+    created[0].send({
+      type: 'done',
+      requestId: created[0].lastRequestId,
+      ok: true,
+      stdout: '1',
+      stderr: '',
+      ms: 5_030,
+      loadMs: 5_000,
+    });
+    await expect(pending).resolves.toMatchObject({ ok: true, ms: 30, loadMs: 5_000 });
   });
 
   it('drops a result that belongs to a run the learner already left', async () => {
@@ -179,6 +235,7 @@ describe('Python runtime protocol', () => {
   it('keeps a program error separate from a successful run', async () => {
     const created = useFakeWorkers();
     const pending = runPython('raise ValueError("boom")', {}, 'main.py');
+    created[0].send({ type: 'progress', stage: 'ready', percent: 100 });
     created[0].send({
       type: 'done',
       requestId: created[0].lastRequestId,

@@ -64,6 +64,8 @@ const ko = {
   stopHintRun: '실행 중인 프로그램을 중단합니다',
   lines: '줄',
   editorTitle: '코드',
+  editorEmptyTitle: '편집할 파일이 없습니다',
+  editorEmptyBody: '왼쪽 파일 탭에서 + 를 눌러 새 파일을 만들면 바로 편집할 수 있습니다.',
 
   terminalTitle: '터미널',
   terminalPlaceholder: '명령을 입력하고 Enter 를 누르세요',
@@ -109,6 +111,8 @@ const ko = {
   pyFirstRun: '첫 실행에는 약 10MB의 런타임을 내려받습니다.',
   pyStopped: '실행을 중단했습니다',
   pyTimeout: '실행 시간이 초과되어 중단했습니다',
+  pyLoadTimeout: 'Python 런타임을 불러오지 못했습니다 (30초 초과)',
+  pyStale: '실행 뒤 코드가 바뀌어 이 출력은 미션 판정에 쓰지 않습니다',
   pyBusy: '이미 실행 중입니다. 끝나거나 중단될 때까지 기다려 주세요.',
   pyFailed: '프로그램이 오류로 끝났습니다',
 
@@ -187,6 +191,8 @@ const en: Dict = {
   stopHintRun: 'Stop the running program',
   lines: 'lines',
   editorTitle: 'Editor',
+  editorEmptyTitle: 'No file to edit',
+  editorEmptyBody: 'Create one with + in the Files tab on the left, then type here.',
 
   terminalTitle: 'Terminal',
   terminalPlaceholder: 'Type a command and press Enter',
@@ -232,6 +238,8 @@ const en: Dict = {
   pyFirstRun: 'The first run downloads roughly 10 MB of runtime.',
   pyStopped: 'Run stopped',
   pyTimeout: 'Stopped because it ran too long',
+  pyLoadTimeout: 'The Python runtime could not be loaded (30s limit)',
+  pyStale: 'The code changed after this run, so its output no longer counts for missions',
   pyBusy: 'A program is already running — wait for it or press Stop.',
   pyFailed: 'The program ended with an error',
 

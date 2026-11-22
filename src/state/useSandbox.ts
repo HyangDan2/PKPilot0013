@@ -26,8 +26,8 @@ import {
 import type { CommandResult, OutLine, RuntimeId } from '../tracks/types';
 import { out } from '../tracks/types';
 import { evaluateCheck } from '../lessons/checks';
-import { gitFields } from '../lessons/state';
-import type { Lesson, LessonState } from '../lessons/types';
+import { lessonState, sourceHash } from './lesson-state';
+import type { Lesson } from '../lessons/types';
 import type { Lang } from '../i18n';
 import {
   bootstrapSession,
@@ -51,28 +51,16 @@ const nextId = () => {
   return entryId;
 };
 
-/** How long a run may take before the worker is killed. */
+/** How long a program may take before its worker is killed. */
 const RUN_TIMEOUT_MS = 20_000;
+/** How long the runtime may take to fetch and start before we give up on it. */
+const LOAD_TIMEOUT_MS = 30_000;
 
 /**
- * Mission checks see the last run only when that run finished cleanly: a crash,
- * a SyntaxError or a stop is not "my program worked".
+ * Mission checks see the last run only when that run finished cleanly *and* the
+ * files it ran are still the files on screen: a crash, a SyntaxError, a stop, or
+ * an edit made after the run is not "my program worked".
  */
-const lessonState = (lesson: Lesson, session: Session): LessonState => {
-  const snap = lesson.runtime === 'git' ? session.gitSnap : null;
-  const ran = session.lastRun?.ok === true;
-  return {
-    runtime: lesson.runtime,
-    files: session.files,
-    active: session.active,
-    runs: session.runs,
-    stdout: ran ? session.lastStdout : '',
-    stderr: session.lastStderr,
-    history: session.history,
-    lastCommand: session.lastCmd,
-    ...gitFields(snap),
-  };
-};
 
 export interface SandboxApi {
   lesson: Lesson;
@@ -83,6 +71,8 @@ export interface SandboxApi {
   completed: string[];
   running: boolean;
   pyProgress: PythonProgress;
+  /** true when the last run's source no longer matches the editor. */
+  staleRun: boolean;
   toast: Toast | null;
   submit: (command: string) => Promise<void>;
   runActive: () => Promise<void>;
@@ -204,7 +194,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     (next: Session): Session => {
       if (lesson.runtime !== 'git') return next;
       const repo = getGit();
-      const projected = projectGit(repo, next.active, lesson.entry);
+      const projected = projectGit(repo, next.active);
       return { ...next, files: projected.files, active: projected.active, gitSnap: repo.snapshot() };
     },
     [lesson.runtime, lesson.entry, getGit],
@@ -229,11 +219,15 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         };
       }
       const generationAtStart = generation.current;
+      const hashAtStart = sourceHash(current.files);
       runningRef.current = true;
       setRunning(true);
       const poll = window.setInterval(() => setPyProgress({ ...pythonStatus() }), 200);
       try {
-        const run = await runPython(code, current.files, file, { timeoutMs: RUN_TIMEOUT_MS });
+        const run = await runPython(code, current.files, file, {
+          timeoutMs: RUN_TIMEOUT_MS,
+          loadTimeoutMs: LOAD_TIMEOUT_MS,
+        });
         setPyProgress({ ...pythonStatus() });
         if (generationAtStart !== generation.current) {
           // The learner restarted the lesson while this program was running.
@@ -244,6 +238,15 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         if (run.stderr) run.stderr.split('\n').forEach((line) => lines.push(out(line, 'err')));
         if (run.error === 'cancelled') {
           lines.push(out(langRef.current === 'ko' ? '실행을 중단했습니다.' : 'Run stopped.', 'warn'));
+        } else if (run.error === 'load-timeout') {
+          lines.push(
+            out(
+              langRef.current === 'ko'
+                ? `Python 런타임을 ${LOAD_TIMEOUT_MS / 1000}초 안에 불러오지 못했습니다. 연결을 확인하고 다시 실행해 주세요. (프로그램은 아직 실행되지 않았습니다)`
+                : `The Python runtime did not load within ${LOAD_TIMEOUT_MS / 1000}s. Check the connection and run again — your program has not run yet.`,
+              'warn',
+            ),
+          );
         } else if (run.error === 'timeout') {
           lines.push(out(langRef.current === 'ko' ? `실행 시간이 ${RUN_TIMEOUT_MS / 1000}초를 넘어 중단했습니다.` : `Stopped after ${RUN_TIMEOUT_MS / 1000}s.`, 'warn'));
         } else if (run.error === 'busy') {
@@ -267,6 +270,10 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
               ok: run.ok,
               cancelled: run.stoppedBy === 'user',
               timedOut: run.stoppedBy === 'timeout',
+              phase: run.phase,
+              loadMs: run.loadMs,
+              // Which source this output belongs to — a later edit makes it stale.
+              sourceHash: hashAtStart,
             },
             lastStdout: run.stdout,
             lastStderr: run.stderr,
@@ -355,7 +362,19 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         const python = await pythonTerminal(current, text);
         if (generationAtStart !== generation.current) return;
         result = python.result;
-        next = { ...python.session, history: [...current.history, text] };
+        // The learner may have typed in the editor while the program was running,
+        // so the files come from the session as it is now — only the run's own
+        // results are taken from the snapshot the run started with.
+        const latest = sessionRef.current;
+        next = {
+          ...latest,
+          runs: python.session.runs,
+          lastRun: python.session.lastRun,
+          lastStdout: python.session.lastStdout,
+          lastStderr: python.session.lastStderr,
+          history: [...latest.history, text],
+          lastCmd: text,
+        };
       }
 
       const entries: TermEntry[] = [echoed, { id: nextId(), kind: 'out', lines: result.lines }];
@@ -407,7 +426,8 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const setFile = useCallback(
     (path: string, content: string) => {
       const current = sessionRef.current;
-      if (current.files[path] === content) return;
+      // With no open file there is nothing to edit — the learner creates one first.
+      if (!path || current.files[path] === content) return;
       if (lesson.runtime === 'git') getGit().workdir[path] = content;
       const files = repositoryFiles(lesson.runtime, getGit, { ...current.files, [path]: content });
       commit(withGitSnapshot({ ...current, files }));
@@ -553,6 +573,8 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const runtime = lesson.runtime;
   const free = session.free || session.missionIndex >= lesson.missions.length;
   const activeMission = free ? null : lesson.missions[session.missionIndex] ?? null;
+  const staleRun =
+    runtime === 'python' && session.lastRun?.ok === true && session.lastRun.sourceHash !== sourceHash(session.files);
 
   return useMemo(
     () => ({
@@ -563,6 +585,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       completed: session.done,
       running,
       pyProgress,
+      staleRun,
       toast,
       submit,
       runActive,
@@ -579,7 +602,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       toggleHint,
     }),
     [
-      lesson, runtime, session, activeMission, running, pyProgress, toast, submit, runActive, stopRun, setFile,
+      lesson, runtime, session, activeMission, running, pyProgress, staleRun, toast, submit, runActive, stopRun, setFile,
       openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete, selectMission, toggleHint,
     ],
   );

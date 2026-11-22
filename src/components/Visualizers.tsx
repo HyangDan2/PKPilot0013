@@ -8,14 +8,27 @@ export function PythonOutput({
   run,
   progress,
   running,
+  stale = false,
 }: {
   lang: Lang;
   run: RunOutput | null;
   progress: PythonProgress;
   running: boolean;
+  stale?: boolean;
 }) {
   const loading = running && (progress.stage === 'script' || progress.stage === 'runtime') && !(run && !run.ok);
   const failed = !!run && !run.ok;
+  const failureLabel = !run
+    ? ''
+    : run.cancelled
+      ? t(lang, 'pyStopped')
+      : run.timedOut
+        ? run.phase === 'load'
+          ? t(lang, 'pyLoadTimeout')
+          : t(lang, 'pyTimeout')
+        : run.phase === 'load'
+          ? t(lang, 'pyOffline')
+          : t(lang, 'pyFailed');
   return (
     <div className="viz-card" data-testid="output-card" data-state={failed ? 'error' : 'ok'}>
       <div className="viz-head">
@@ -41,12 +54,18 @@ export function PythonOutput({
         <>
           {failed && (
             <p className="viz-error" data-testid="py-failed">
-              {run.cancelled ? t(lang, 'pyStopped') : run.timedOut ? t(lang, 'pyTimeout') : t(lang, 'pyFailed')}
+              {failureLabel}
             </p>
           )}
           <p className="viz-note">
             {run.path} · {run.ms} ms
+            {run.loadMs ? ` · 런타임 ${Math.round(run.loadMs / 100) / 10}s` : ''}
           </p>
+          {stale && (
+            <p className="viz-note" data-testid="py-stale">
+              {t(lang, 'pyStale')}
+            </p>
+          )}
           {run.stdout && (
             <pre className="out-block" data-testid="py-stdout">
               {run.stdout}

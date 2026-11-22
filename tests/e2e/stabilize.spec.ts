@@ -251,3 +251,136 @@ test.describe('existing behaviour is intact on both layouts', () => {
     expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
   });
 });
+
+/**
+ * Second stabilisation round (v2.1.0 · WO-07 … WO-12): the promises that the
+ * learner's own work is never lost, that an edited Python module is re-imported,
+ * and that an empty workspace is still a working workspace.
+ */
+test.describe('WO-07/08 · local work is protected', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('@smoke git merge --abort puts the learner’s own work back', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openGit(page);
+    await page.getByTestId('tab-hello.txt').click();
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+
+    await run(page, 'git switch -c feature');
+    await page.getByTestId('code-area').fill('feature 쪽\n');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "feature 작업"');
+
+    await run(page, 'git switch main');
+    await page.getByTestId('code-area').fill('main 쪽\n');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "main 작업"');
+
+    // work the learner has not committed yet must survive merge and abort
+    await page.getByTestId('tab-notes.md').click();
+    await page.getByTestId('code-area').fill('# 아직 커밋하지 않은 메모\n');
+    await page.getByTestId('tab-hello.txt').click();
+
+    await run(page, 'git merge feature');
+    await expect(page.getByTestId('code-area')).toHaveValue(/<<<<<<< HEAD/);
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('병합 진행 중');
+
+    await run(page, 'git merge --abort');
+    await expect(page.getByTestId('terminal')).toContainText('Merge aborted.');
+    await expect(page.getByTestId('code-area')).toHaveValue('main 쪽\n');
+    await expect(page.locator('[data-panel="working-tree"]')).not.toContainText('병합 진행 중');
+    await expect(page.locator('[data-panel="working-tree"]')).toContainText('notes.md');
+
+    await page.getByTestId('tab-notes.md').click();
+    await expect(page.getByTestId('code-area')).toHaveValue('# 아직 커밋하지 않은 메모\n');
+    expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+
+  test('@smoke git rm refuses to delete uncommitted work, and -f deletes it', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openGit(page);
+    await page.getByTestId('tab-hello.txt').click();
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+    await page.getByTestId('code-area').fill('아직 커밋하지 않은 수정\n');
+
+    await run(page, 'git rm hello.txt');
+    await expect(page.getByTestId('terminal')).toContainText('have local modifications');
+    await expect(page.getByTestId('tab-hello.txt')).toHaveCount(1);
+    await expect(page.getByTestId('code-area')).toHaveValue('아직 커밋하지 않은 수정\n');
+
+    await run(page, 'git rm -f hello.txt');
+    await expect(page.getByTestId('file-hello.txt')).toHaveCount(0);
+    await expect(page.getByTestId('tab-hello.txt')).toHaveCount(0);
+    expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+});
+
+test.describe('WO-12 · an empty workspace', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('@smoke removing every file shows an empty editor, and a new file works', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openGit(page);
+    await run(page, 'git init');
+    await run(page, 'git add .');
+    await run(page, 'git commit -m "첫 커밋"');
+    await run(page, 'git rm README.md hello.txt notes.md');
+
+    await expect(page.getByTestId('editor-empty')).toBeVisible();
+    await expect(page.getByTestId('code-area')).toHaveCount(0);
+    await expect(page.locator('[data-panel="working-tree"]')).not.toContainText('Untracked');
+
+    await page.getByTestId('side-tab-files').click();
+    await page.getByTestId('new-file').click();
+    await page.locator('.file-row.editing input').fill('fresh.md');
+    await page.locator('.file-row.editing input').press('Enter');
+    await expect(page.getByTestId('tab-fresh.md')).toBeVisible();
+    await page.getByTestId('code-area').fill('# 새 출발\n');
+
+    await run(page, 'git status');
+    await expect(page.getByTestId('terminal')).toContainText('fresh.md');
+    expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+});
+
+test.describe('WO-11 · Python runs belong to their source', () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test('an edited lesson module is imported fresh on the next run', async ({ page }) => {
+    await page.goto('./');
+    await page.getByTestId('lesson-card-python-hello').click();
+    await page.getByTestId('tab-practice.py').click();
+    await page.getByTestId('code-area').fill('value = 1\n');
+    await page.getByTestId('tab-main.py').click();
+    await page.getByTestId('code-area').fill('from practice import value\nprint(value)\n');
+    await page.getByTestId('run').click();
+    await expect(page.getByTestId('py-stdout')).toHaveText('1', { timeout: 180_000 });
+
+    // edit the module, run the importer again — the cached module must not win
+    await page.getByTestId('tab-practice.py').click();
+    await page.getByTestId('code-area').fill('value = 22\n');
+    await page.getByTestId('tab-main.py').click();
+    await page.getByTestId('run').click();
+    await expect(page.getByTestId('py-stdout')).toHaveText('22', { timeout: 120_000 });
+  });
+
+  test('output from a run made before an edit is marked stale', async ({ page }) => {
+    await page.goto('./');
+    await page.getByTestId('lesson-card-python-hello').click();
+    await page.getByTestId('code-area').fill('print("첫 실행")\n');
+    await page.getByTestId('run').click();
+    await expect(page.getByTestId('py-stdout')).toHaveText('첫 실행', { timeout: 180_000 });
+    await expect(page.getByTestId('py-stale')).toHaveCount(0);
+
+    await page.getByTestId('code-area').fill('print("두 번째")\n');
+    await expect(page.getByTestId('py-stale')).toBeVisible();
+
+    await page.getByTestId('run').click();
+    await expect(page.getByTestId('py-stdout')).toHaveText('두 번째', { timeout: 120_000 });
+    await expect(page.getByTestId('py-stale')).toHaveCount(0);
+  });
+});

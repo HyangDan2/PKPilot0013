@@ -44,16 +44,17 @@ interface PanelSlotsProps {
   run: RunOutput | null;
   progress: PythonProgress;
   running: boolean;
+  staleRun?: boolean;
 }
 
-export function PanelSlots({ lang, declared, fallback, gitSnap, run, progress, running }: PanelSlotsProps) {
+export function PanelSlots({ lang, declared, fallback, gitSnap, run, progress, running, staleRun = false }: PanelSlotsProps) {
   const panels = resolvePanels(declared, fallback);
   return (
     <>
       {panels.map((id) => (
         <div className="slot" key={id} data-panel={id}>
           {id === 'output' && (
-            <PythonOutput lang={lang} run={run} progress={progress} running={running} />
+            <PythonOutput lang={lang} run={run} progress={progress} running={running} stale={staleRun} />
           )}
           {id === 'git-graph' && <GitGraph lang={lang} snap={gitSnap} />}
           {id === 'working-tree' && <GitStatus lang={lang} snap={gitSnap} />}

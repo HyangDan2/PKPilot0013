@@ -19,11 +19,12 @@ interface EditorProps {
 export function Editor({ lang, runtime, files, active, running, onChange, onOpen, onRun, onStop }: EditorProps) {
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
-  const code = files[active] ?? '';
-  const lineCount = code.split('\n').length;
+  const hasFile = active !== '' && files[active] !== undefined;
+  const code = hasFile ? files[active] : '';
+  const lineCount = Math.max(1, code.split('\n').length);
   const names = Object.keys(files).sort();
   const runLabel = runtime === 'git' ? t(lang, 'runGit') : t(lang, 'run');
-  const tokens = useMemo(() => tokenize(code, langForPath(active)), [code, active]);
+  const tokens = useMemo(() => (hasFile ? tokenize(code, langForPath(active)) : []), [hasFile, code, active]);
 
   const insertTab = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const area = event.currentTarget;
@@ -80,14 +81,20 @@ export function Editor({ lang, runtime, files, active, running, onChange, onOpen
               {t(lang, 'stop')}
             </button>
           ) : (
-            <button type="button" className="run-btn" onClick={onRun} data-testid="run">
+            <button type="button" className="run-btn" onClick={onRun} data-testid="run" disabled={!hasFile}>
               <IconPlay size={12} />
               {runLabel}
             </button>
           )}
         </div>
       </div>
-      <div className="editor-body">
+      {!hasFile ? (
+        <div className="editor-empty" data-testid="editor-empty">
+          <p className="editor-empty-title">{t(lang, 'editorEmptyTitle')}</p>
+          <p className="editor-empty-body">{t(lang, 'editorEmptyBody')}</p>
+        </div>
+      ) : (
+        <div className="editor-body">
         <div className="gutter" ref={gutterRef} aria-hidden>
           {Array.from({ length: lineCount }, (_, index) => (
             <span key={index}>{index + 1}</span>
@@ -128,6 +135,7 @@ export function Editor({ lang, runtime, files, active, running, onChange, onOpen
           />
         </div>
       </div>
+      )}
     </section>
   );
 }

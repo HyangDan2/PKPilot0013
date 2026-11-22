@@ -656,6 +656,27 @@ img {
   min-height: 0;
   background: var(--ide-term);
 }
+.editor-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  background: var(--ide-term);
+  color: var(--fg-dim);
+}
+.editor-empty-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.editor-empty-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
 .gutter {
   flex: none;
   width: 46px;
