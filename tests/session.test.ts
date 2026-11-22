@@ -13,6 +13,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { lessonById } from '../src/lessons';
 import type { Lesson } from '../src/lessons/types';
 import { useSandbox, type SandboxApi } from '../src/state/useSandbox';
+import { lessonState, sourceHash } from '../src/state/lesson-state';
+import { bootstrapSession, type RunOutput, type Session } from '../src/state/session';
+import { evaluateCheck } from '../src/lessons/checks';
+import { installFakeWorkers, type FakeWorker } from './fake-worker';
+import { __setPythonWorkerFactory } from '../src/tracks/python/runner';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -87,6 +92,7 @@ afterEach(() => {
     act(() => root?.unmount());
     root = null;
   }
+  __setPythonWorkerFactory(null);
   window.localStorage.clear();
 });
 
@@ -276,6 +282,139 @@ describe('WO-06 · coming back where you left off', () => {
       expect(again.api.session.runs).toBe(0);
     } finally {
       again.unmount();
+    }
+  });
+});
+
+describe('WO-11 · a run belongs to the source it was produced from', () => {
+  const sumSource = 'numbers = [12, 45, 7, 23, 88, 34, 61, 15]\nprint(sum(numbers))\n';
+  const editedSource = 'numbers = [1]\nprint(sum(numbers))\n# 같은 파일, 다른 내용\n';
+
+  /** Starts a run, answers it with the given stdout, and waits for the hook. */
+  const runWith = async (ui: Harness, workers: FakeWorker[], stdout: string) => {
+    let pending!: Promise<void>;
+    act(() => {
+      pending = ui.api.submit('python main.py');
+    });
+    workers[workers.length - 1].finish(stdout);
+    await act(async () => {
+      await pending;
+    });
+  };
+
+  it('does not judge a mission from output whose source has since changed', () => {
+    const files = { 'main.py': sumSource };
+    const run: RunOutput = {
+      stdout: '285',
+      stderr: '',
+      ms: 3,
+      path: 'main.py',
+      ok: true,
+      sourceHash: sourceHash(files),
+    };
+    const session: Session = {
+      ...bootstrapSession(pythonLesson).session,
+      files,
+      active: 'main.py',
+      lastRun: run,
+      lastStdout: '285',
+    };
+    const sumCheck = pythonLesson.missions.find((mission) => mission.id === 'py-sum')!.check;
+
+    // same files → the output is evidence
+    expect(lessonState(pythonLesson, session).stdout).toBe('285');
+    expect(evaluateCheck(sumCheck, lessonState(pythonLesson, session))).toBe(true);
+
+    // a later edit makes it worthless, even though `sum(` is still in the file
+    const edited: Session = { ...session, files: { 'main.py': editedSource } };
+    expect(lessonState(pythonLesson, edited).stdout).toBe('');
+    expect(evaluateCheck(sumCheck, lessonState(pythonLesson, edited))).toBe(false);
+  });
+
+  it('blocks the award when the learner edits while the program is running', async () => {
+    const workers = installFakeWorkers();
+    const ui = mount(pythonLesson);
+    try {
+      ui.type('main.py', sumSource);
+      let pending!: Promise<void>;
+      act(() => {
+        pending = ui.api.submit('python main.py');
+      });
+      // the program is still running when the editor changes
+      ui.type('main.py', editedSource);
+      workers[0].finish('285');
+      await act(async () => {
+        await pending;
+      });
+
+      expect(ui.api.session.lastRun?.ok).toBe(true);
+      expect(ui.api.staleRun).toBe(true);
+      expect(ui.api.session.done).not.toContain('py-sum');
+
+      // the edited source is what counts now, and it prints 1, not 285
+      await runWith(ui, workers, '1');
+      expect(ui.api.staleRun).toBe(false);
+      expect(ui.api.session.done).not.toContain('py-sum');
+
+      ui.type('main.py', sumSource);
+      await runWith(ui, workers, '285');
+      expect(ui.api.session.done).toContain('py-sum');
+    } finally {
+      ui.unmount();
+    }
+  });
+});
+
+describe('WO-12 · a lesson with no files at all', () => {
+  it('keeps an empty working tree through a reload and creates the next file from it', async () => {
+    const first = mount(gitLesson);
+    await first.submit('git init');
+    await first.submit('git add .');
+    await first.submit('git commit -m "첫 커밋"');
+    await first.submit('git rm README.md hello.txt notes.md');
+    expect(first.api.session.files).toEqual({});
+    expect(first.api.session.active).toBe('');
+    expect(first.api.session.gitSnap?.unstaged).toEqual([]);
+    await settleStorage();
+    first.unmount();
+
+    const second = mount(gitLesson);
+    try {
+      // the empty file list came back instead of the lesson's starting files
+      expect(second.api.session.files).toEqual({});
+      expect(second.api.session.active).toBe('');
+      expect(second.api.session.done).toContain('git-init');
+
+      act(() => second.api.createFile('fresh.md'));
+      expect(second.api.session.files).toEqual({ 'fresh.md': '' });
+      expect(second.api.session.active).toBe('fresh.md');
+      second.type('fresh.md', '# 새 파일\n');
+      await second.submit('git status');
+      expect(second.api.session.gitSnap?.untracked).toEqual(['fresh.md']);
+    } finally {
+      second.unmount();
+    }
+  });
+
+  it('accepts a saved session that holds an empty file list', () => {
+    const payload = {
+      version: 3,
+      files: {},
+      active: '',
+      done: ['git-init'],
+      missionIndex: 1,
+      free: false,
+      git: null,
+      savedAt: Date.now(),
+    };
+    window.localStorage.setItem('codeplayground:session:v3:git-basics', JSON.stringify(payload));
+    const ui = mount(gitLesson);
+    try {
+      expect(ui.api.session.files).toEqual({});
+      expect(ui.api.session.active).toBe('');
+      expect(ui.api.session.done).toEqual(['git-init']);
+    } finally {
+      ui.unmount();
     }
   });
 });

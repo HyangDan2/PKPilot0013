@@ -65,6 +65,12 @@ export interface GitRepoState {
   branches: Record<string, string | null>;
   head: Head;
   mergePending: string | null;
+  /**
+   * The exact state from the moment a merge started (null when no merge is in
+   * progress). `git merge --abort` restores it whole, so the learner's staged,
+   * unstaged and untracked work survives a merge they decide to back out of.
+   */
+  mergeState: GitRepoState | null;
   stats: { commits: number; merges: number; rebases: number };
   clock: number;
   serial: number;
@@ -122,6 +128,8 @@ export class GitRepo {
   branches: Record<string, string | null> = {};
   head: Head = { kind: 'branch', name: DEFAULT_BRANCH };
   mergePending: string | null = null;
+  /** Pre-merge state, kept only while a conflicted merge is unresolved. */
+  mergeState: GitRepoState | null = null;
   stats = { commits: 0, merges: 0, rebases: 0 };
 
   private clock = Date.now() - 1000 * 60 * 60 * 24 * 3;
@@ -149,6 +157,7 @@ export class GitRepo {
       branches: { ...this.branches },
       head: { ...this.head },
       mergePending: this.mergePending,
+      mergeState: this.mergeState ? (JSON.parse(JSON.stringify(this.mergeState)) as GitRepoState) : null,
       stats: { ...this.stats },
       clock: this.clock,
       serial: this.serial,
@@ -165,6 +174,7 @@ export class GitRepo {
     this.branches = copy.branches;
     this.head = copy.head;
     this.mergePending = copy.mergePending;
+    this.mergeState = copy.mergeState ? (JSON.parse(JSON.stringify(copy.mergeState)) as GitRepoState) : null;
     this.stats = copy.stats;
     this.clock = copy.clock;
     this.serial = copy.serial;
@@ -201,6 +211,12 @@ export class GitRepo {
       branches: state.branches as Record<string, string | null>,
       head,
       mergePending: typeof state.mergePending === 'string' ? state.mergePending : null,
+      // Older saves have no snapshot; a merge in progress is still usable, it
+      // just aborts back to HEAD instead of the exact pre-merge work tree.
+      mergeState:
+        state.mergeState && typeof state.mergeState === 'object'
+          ? (JSON.parse(JSON.stringify(state.mergeState)) as GitRepoState)
+          : null,
       stats: {
         commits: Number(state.stats?.commits ?? 0),
         merges: Number(state.stats?.merges ?? 0),
@@ -704,6 +720,7 @@ export class GitRepo {
     else this.head = { kind: 'detached', sha: commit.sha };
     this.index = { ...tree };
     this.mergePending = null;
+    this.mergeState = null;
 
     const lines: OutLine[] = [];
     lines.push(mix(`[${this.branch ?? 'detached HEAD'} `, { text: commit.sha.slice(0, 7), tone: 'sha' }, `] ${message}`));
@@ -779,6 +796,12 @@ export class GitRepo {
     if (!target) {
       return fail([
         out(`fatal: ${flavor === 'switch' ? "missing branch or commit argument" : "you must specify path(s) to restore"}`, 'err'),
+      ]);
+    }
+    if (this.mergePending) {
+      return fail([
+        out('error: you need to resolve your current index first', 'err'),
+        out('hint: 진행 중인 병합을 마무리하거나 "git merge --abort" 로 되돌린 뒤 브랜치를 바꾸세요.', 'dim'),
       ]);
     }
 
@@ -927,10 +950,29 @@ export class GitRepo {
   private cmdMerge(args: string[]): CommandResult {
     if (args.includes('--abort')) {
       if (!this.mergePending) return fail([out('fatal: There is no merge to abort (MERGE_HEAD missing).', 'err')]);
+      const snapshot = this.mergeState;
       this.mergePending = null;
+      this.mergeState = null;
+      if (snapshot) {
+        // Put back everything the learner had when the merge started — the
+        // staged work, the unstaged edits and the untracked files — not just HEAD.
+        this.restore(snapshot);
+        this.mergePending = null;
+        this.mergeState = null;
+        return result([
+          out('Merge aborted.', 'warn'),
+          out('병합을 시작하기 전의 파일과 스테이징 상태로 되돌렸습니다.', 'dim'),
+        ]);
+      }
       this.workdir = { ...this.headTree() };
       this.index = { ...this.headTree() };
       return result([out('Merge aborted.', 'warn')]);
+    }
+    if (this.mergePending) {
+      return fail([
+        out('error: You have not concluded your merge (MERGE_HEAD exists).', 'err'),
+        out('hint: 충돌을 정리하고 "git add ." · "git commit -m \\"merge\\"" 로 마무리하거나, "git merge --abort" 로 되돌리세요.', 'dim'),
+      ]);
     }
     const name = args.find((arg) => !arg.startsWith('-'));
     if (!name) return fail([out('fatal: No commit specified and merge.defaultToUpstream not set.', 'err')]);
@@ -967,6 +1009,10 @@ export class GitRepo {
     // A merge must never quietly roll over work the learner has not committed.
     const plan = this.localChangePlan(tree);
     if (plan.blocked.length) return this.blockedMerge(plan.blocked);
+    // From here the working tree is rewritten, so keep the exact pre-merge
+    // state: a conflicted learner can back out with `git merge --abort`.
+    this.mergeState = null;
+    const snapshot = this.capture();
     const lines: OutLine[] = [];
     for (const path of Object.keys(tree)) {
       if (conflicts.includes(path)) continue;
@@ -988,9 +1034,11 @@ export class GitRepo {
       }
       this.workdir = workdir;
       this.mergePending = name;
+      this.mergeState = snapshot;
       return fail(lines);
     }
     this.applyTree(tree);
+    this.mergeState = null;
     const commit = this.createCommit(`Merge branch '${name}'`, tree, [ourSha, theirSha as string]);
     if (this.branch) this.branches[this.branch] = commit.sha;
     const diffs = diffTrees(this.commits[ourSha].tree, tree);
@@ -1117,6 +1165,7 @@ export class GitRepo {
       this.workdir = { ...tree, ...loose };
       this.index = { ...tree };
       this.mergePending = null;
+      this.mergeState = null;
       lines.push(out(`HEAD is now at ${sha.slice(0, 7)} ${this.commits[sha].message}`, 'ok'));
     } else if (!soft) {
       this.index = { ...tree };
@@ -1271,12 +1320,42 @@ export class GitRepo {
 
   private cmdRm(args: string[]): CommandResult {
     const cached = args.includes('--cached');
+    const force = args.includes('-f') || args.includes('--force');
     const paths = args.filter((arg) => !arg.startsWith('-'));
     if (!paths.length) return fail([out('fatal: No pathspec was given. Which files should I remove?', 'err')]);
     // Validate every pathspec first — `git rm a b` removes neither when b is unknown.
     const unknown = paths.filter((path) => !(path in this.index));
     if (unknown.length) {
       return fail(unknown.map((path) => out(`fatal: pathspec '${path}' did not match any files`, 'err')));
+    }
+    // Real git refuses to delete a file whose content exists nowhere else yet.
+    // Without this, one `git rm` after a long edit silently threw that edit away.
+    if (!force) {
+      const head = this.headTree();
+      const staged = paths.filter((path) => this.index[path] !== head[path]);
+      const local = paths.filter(
+        (path) => this.index[path] === head[path] && this.workdir[path] !== this.index[path],
+      );
+      if (staged.length || local.length) {
+        const lines: OutLine[] = [];
+        if (staged.length) {
+          lines.push(
+            out('error: the following files have staged content different from both the file and the HEAD:', 'err'),
+            ...staged.map((path) => out(`    ${path}`, 'err')),
+          );
+        }
+        if (local.length) {
+          lines.push(
+            out('error: the following files have local modifications:', 'err'),
+            ...local.map((path) => out(`    ${path}`, 'err')),
+          );
+        }
+        lines.push(
+          out('(use -f to force removal)', 'dim'),
+          out('hint: 아직 커밋하지 않은 내용이 있습니다. 정말 지우려면 "git rm -f <파일>" 을 입력하세요.', 'dim'),
+        );
+        return fail(lines);
+      }
     }
     const lines: OutLine[] = [];
     for (const path of paths) {

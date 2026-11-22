@@ -18,7 +18,13 @@ export default defineConfig({
   use: {
     baseURL,
     trace: 'on-first-retry',
-    launchOptions: process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {},
+    // `--disable-dev-shm-usage` keeps Chromium off the tiny /dev/shm of a
+    // container sandbox (64 MB here), where a launch intermittently dies with
+    // SIGTRAP/EAGAIN. Harmless on a normal CI runner.
+    launchOptions: {
+      ...(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {}),
+      args: ['--disable-dev-shm-usage'],
+    },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: process.env.PK13_BASE

@@ -34,6 +34,12 @@ export interface RunOutput {
   ok: boolean;
   cancelled?: boolean;
   timedOut?: boolean;
+  /** Which limit stopped the run, or which phase failed. */
+  phase?: 'load' | 'run';
+  /** Time the runtime took to come up for this run. */
+  loadMs?: number;
+  /** Fingerprint of the files this output was produced from (see `sourceHash`). */
+  sourceHash?: string;
 }
 
 export interface Session {
@@ -89,13 +95,16 @@ export function readSavedSession(lessonId: string): PersistedSession | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<PersistedSession>;
     if (parsed.version !== SESSION_VERSION) return null;
-    if (!isStringMap(parsed.files) || Object.keys(parsed.files).length === 0) return null;
-    if (typeof parsed.active !== 'string' || !(parsed.active in parsed.files)) return null;
+    if (!isStringMap(parsed.files)) return null;
+    // An empty file list is a real state (every file was deleted or `git rm`-ed),
+    // not a corrupt one — it must come back as it was saved.
+    if (typeof parsed.active !== 'string') return null;
+    if (Object.keys(parsed.files).length > 0 && !(parsed.active in parsed.files)) return null;
     const done = Array.isArray(parsed.done) ? parsed.done.filter((id): id is string => typeof id === 'string') : [];
     return {
       version: SESSION_VERSION,
       files: parsed.files,
-      active: parsed.active,
+      active: Object.keys(parsed.files).length > 0 ? parsed.active : '',
       done,
       missionIndex: Number.isFinite(parsed.missionIndex) ? Number(parsed.missionIndex) : 0,
       free: parsed.free === true,
@@ -154,7 +163,7 @@ export function readLegacyProgress(lessonId: string): string[] {
 export function bootstrapSession(lesson: Lesson): { session: Session; repo: GitRepo | null } {
   const saved = readSavedSession(lesson.id);
   const files = saved ? { ...saved.files } : { ...lesson.files };
-  const active = saved && saved.active in files ? saved.active : lesson.entry in files ? lesson.entry : Object.keys(files).sort()[0] ?? lesson.entry;
+  const active = saved && saved.active in files ? saved.active : lesson.entry in files ? lesson.entry : Object.keys(files).sort()[0] ?? '';
   const done = saved ? saved.done : readLegacyProgress(lesson.id);
   const missionIndex = saved
     ? Math.min(Math.max(0, saved.missionIndex), lesson.missions.length)
@@ -185,16 +194,19 @@ export function bootstrapSession(lesson: Lesson): { session: Session; repo: GitR
 /**
  * The working tree → the editor. A file that vanished (deleted, or checked out
  * from another branch) hands the editor to a file that still exists, so the
- * active path is never stale.
+ * active path is never stale. A working tree with no files at all produces an
+ * empty active path, which the editor shows as an empty workspace.
  */
 export function projectGit(
   repo: GitRepo,
   active: string,
-  entry: string,
 ): { files: Record<string, string>; active: string } {
   const files = { ...repo.workdir };
   if (files[active] !== undefined) return { files, active };
   const fallback = Object.keys(files).sort()[0];
-  return { files, active: fallback ?? entry };
+  if (fallback) return { files, active: fallback };
+  // Nothing to open. Typing into the entry path would silently resurrect a file,
+  // so the editor decides what to do instead of guessing here.
+  return { files, active: '' };
 }
 

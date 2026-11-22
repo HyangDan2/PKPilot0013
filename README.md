@@ -96,6 +96,25 @@ mission and — for Git — the repository itself (commits, branches, index, a p
 per lesson and restored on load. Restarting a lesson clears that record and starts from the
 markdown again.
 
+A second pass (WO-07 … WO-12) tightened four more edges:
+
+- **`git merge --abort` restores the state the merge started from**, not just HEAD. Staged work,
+  unstaged edits and untracked files all come back byte for byte, in the same session and after a
+  reload; while a merge is unresolved a second `merge` or a `switch` is refused instead of quietly
+  rewriting that snapshot.
+- **`git rm` refuses to delete content that exists nowhere else.** A file with staged or unstaged
+  modifications is kept and reported; only `-f` / `--force` removes it. A clean tracked file still
+  goes without asking, because a commit already holds its content.
+- **An edited lesson module is imported fresh.** Each run clears the lesson's modules from
+  `sys.modules`, drops earlier run directories from `sys.path` and calls
+  `importlib.invalidate_caches()`, so a fixed `practice.py` really takes effect on the next run.
+- **The two waits are reported as what they are.** Loading Pyodide has a 30-second limit and running
+  the program a 20-second one, and the message names the one that expired. Output carries the
+  fingerprint of the files it came from: edit the editor and the old output no longer counts toward
+  a mission (the output card says so).
+- **An empty workspace is a working workspace.** Every file can be removed (or `git rm`-ed) down to
+  zero; that state is saved, restored, and a new file created from it opens straight in the editor.
+
 The Git lesson's "이 실습 엔진이 단순화한 부분" section lists what the teaching engine deliberately
 simplifies (whole-tree snapshots, file-level merge, 8-character hashes, no stash/reflog/remote).
 
@@ -131,9 +150,12 @@ src/
     git/repo.ts        educational Git engine (commands, three-way merge, rebase, reset)
     git/graph.ts       lane/row layout for the commit graph
     git/diff.ts        unified diff + LCS
-    python/runner.ts   Pyodide in a Web Worker: one run at a time, ids, stop, timeout, retry
+    python/runner.ts   Pyodide in a Web Worker: one run at a time, ids, stop,
+                       separate load/run limits, retry
     python/pyodide.worker.ts  the interpreter itself (fresh namespace + VFS per run)
+    python/module-cache.ts    clears the lesson's modules so an edit is re-imported
   state/session.ts     projection of the working tree, save/restore policy
+  state/lesson-state.ts what a mission check may see (and when a run is stale)
   state/useSandbox.ts  lesson ↔ engines ↔ React session, progress persistence
   components/          title bar, landing catalog, lesson doc renderer, sidebar, editor,
                        terminal, mission card, panel slots, git panels

@@ -145,6 +145,7 @@ export function LessonWorkspace({ lesson, lang, theme, onLang, onTheme, onHome }
             run={session.lastRun}
             progress={sandbox.pyProgress}
             running={sandbox.running}
+            staleRun={sandbox.staleRun}
           />
         </aside>
       </div>
@@ -180,7 +181,7 @@ export function LessonWorkspace({ lesson, lang, theme, onLang, onTheme, onHome }
           {lesson.title[lang]}
         </span>
         <span className="status-item">
-          <span className="status-key">{session.active}</span>
+          <span className="status-key">{session.active || '—'}</span>
           {lineCount} {t(lang, 'lines')}
         </span>
         <span className="status-right">

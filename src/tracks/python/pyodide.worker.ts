@@ -7,16 +7,20 @@
  *
  *   page → worker   { type: 'run', requestId, code, files, entry, dir }
  *   worker → page   { type: 'progress', stage, percent }
- *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms }
+ *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms, phase, loadMs }
  *
  * Every run gets a fresh namespace and its own directory inside Pyodide's
  * virtual filesystem, so one run cannot leak variables, files or output into
- * the next — and `main.py` can `import` the lesson's other files.
+ * the next — and `main.py` can `import` the lesson's other files. The module
+ * table is reset before each run as well (`module-cache.ts`), because an edited
+ * module would otherwise stay cached for the rest of the lesson.
  *
  * This file is bundled as a classic worker (Vite builds it as an IIFE), which is
  * what lets it use `importScripts` for the Pyodide CDN build.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { PY_RUN_ROOT, moduleResetScript } from './module-cache';
+
 const CDN = 'https://cdn.jsdelivr.net/pyodide/v0.28.3/full/';
 
 const scope = self as any;
@@ -77,8 +81,10 @@ scope.onmessage = async (event: any) => {
   let ok = false;
   let error: string | undefined;
   let phase: 'load' | 'run' = 'load';
+  let loadMs = 0;
   try {
     const py = await loadRuntime();
+    loadMs = Date.now() - started;
     phase = 'run';
     // A private namespace per run: the same name defined twice does not leak.
     const globals = py.globals.get('dict')();
@@ -87,12 +93,17 @@ scope.onmessage = async (event: any) => {
     writeTree(py, dir, files);
     py.setStdout({ batched: (text: string) => stdout.push(text) });
     py.setStderr({ batched: (text: string) => stderr.push(text) });
+    // The interpreter is shared between runs, so its module table is not:
+    // drop the lesson's modules loaded by an earlier run, and the earlier run
+    // directories, so an edited practice.py is really re-imported.
+    py.runPython(moduleResetScript(files, PY_RUN_ROOT));
     // `import practice` finds the lesson files because the run directory is on
     // sys.path, and open('data.txt') resolves there too.
     py.runPython(`import sys, os\nsys.path.insert(0, ${JSON.stringify(dir)})\nos.chdir(${JSON.stringify(dir)})`);
     await py.runPythonAsync(code, { globals, filename: entry });
     ok = true;
   } catch (thrown: any) {
+    if (phase === 'load') loadMs = Date.now() - started;
     error = String(thrown?.message ?? thrown).replace(/\s+at .*$/s, '').trim();
   }
   post({
@@ -104,5 +115,6 @@ scope.onmessage = async (event: any) => {
     error,
     phase,
     ms: Date.now() - started,
+    loadMs,
   });
 };
