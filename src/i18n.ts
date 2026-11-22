@@ -59,7 +59,9 @@ const ko = {
   run: '실행',
   runGit: '상태 확인',
   running: '실행 중…',
+  stop: '중단',
   stopHint: 'Ctrl+Enter 로도 실행할 수 있습니다',
+  stopHintRun: '실행 중인 프로그램을 중단합니다',
   lines: '줄',
   editorTitle: '코드',
 
@@ -105,6 +107,10 @@ const ko = {
   pyOffline:
     'Pyodide를 불러오지 못했습니다. 오프라인이거나 CDN이 차단된 상태입니다. 연결을 확인한 뒤 다시 실행해 주세요.',
   pyFirstRun: '첫 실행에는 약 10MB의 런타임을 내려받습니다.',
+  pyStopped: '실행을 중단했습니다',
+  pyTimeout: '실행 시간이 초과되어 중단했습니다',
+  pyBusy: '이미 실행 중입니다. 끝나거나 중단될 때까지 기다려 주세요.',
+  pyFailed: '프로그램이 오류로 끝났습니다',
 
   statusLesson: '강의',
   statusRuntime: '런타임',
@@ -176,7 +182,9 @@ const en: Dict = {
   run: 'Run',
   runGit: 'Check status',
   running: 'Running…',
+  stop: 'Stop',
   stopHint: 'Ctrl+Enter works too',
+  stopHintRun: 'Stop the running program',
   lines: 'lines',
   editorTitle: 'Editor',
 
@@ -222,6 +230,10 @@ const en: Dict = {
   pyOffline:
     'Pyodide could not be loaded — you may be offline or the CDN is blocked. Check the connection and run again.',
   pyFirstRun: 'The first run downloads roughly 10 MB of runtime.',
+  pyStopped: 'Run stopped',
+  pyTimeout: 'Stopped because it ran too long',
+  pyBusy: 'A program is already running — wait for it or press Stop.',
+  pyFailed: 'The program ended with an error',
 
   statusLesson: 'Lesson',
   statusRuntime: 'Runtime',

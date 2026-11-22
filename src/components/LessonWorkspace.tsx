@@ -109,6 +109,7 @@ export function LessonWorkspace({ lesson, lang, theme, onLang, onTheme, onHome }
             onChange={(value) => sandbox.setFile(session.active, value)}
             onOpen={sandbox.openFile}
             onRun={sandbox.runActive}
+            onStop={sandbox.stopRun}
           />
           <Terminal
             lang={lang}

@@ -41,8 +41,11 @@ export function evaluateCheck(check: CheckSpec, state: LessonState): boolean {
     case 'git-branch': {
       const branch = state.gitBranches.find((item) => item.name === check.name);
       if (!branch || !branch.sha) return false;
-      // a branch that still points at main is not "a branch of my own yet"
-      return branch.sha !== state.gitMainTip;
+      // A branch counts once it has a commit of its own — a branch that still
+      // points at main, or at an older commit main already contains, is not "a
+      // branch of my own yet".
+      const ahead = branch.ahead ?? (branch.sha === state.gitMainTip ? 0 : 1);
+      return ahead >= 1;
     }
     case 'git-merge':
       return state.gitMergeCommits >= 1;

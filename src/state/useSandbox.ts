@@ -1,51 +1,44 @@
 /**
- * One lesson ↔ one live sandbox. The engines live in refs, the session carries
- * files, terminal history and mission progress, and every command re-evaluates
- * the lesson's mission checks — the same wiring for every lesson, whatever
- * runtime and panel slots its markdown declared.
+ * One lesson ↔ one live sandbox.
+ *
+ * The engines live in refs, the session carries files, terminal history and
+ * mission progress, and every command re-evaluates the lesson's mission checks —
+ * the same wiring for every lesson, whatever runtime and panel slots its
+ * markdown declared.
+ *
+ * Three rules keep the two halves honest:
+ *  - After any Git command the editor is re-projected from the repository's working
+ *    tree (see `projectGit`), so a branch switch really changes the file you see.
+ *  - A Python run is applied only if it is still the run the learner is waiting
+ *    for; restarting the lesson, switching away or pressing Stop invalidates it.
+ *  - Every change is saved, and the lesson reopens where it was left.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RUNTIMES } from '../tracks';
 import { GitRepo } from '../tracks/git/repo';
-import { pythonStatus, runPython, type PythonProgress } from '../tracks/python/runner';
+import {
+  disposePython,
+  cancelPython,
+  pythonStatus,
+  runPython,
+  type PythonProgress,
+} from '../tracks/python/runner';
 import type { CommandResult, OutLine, RuntimeId } from '../tracks/types';
 import { out } from '../tracks/types';
 import { evaluateCheck } from '../lessons/checks';
 import { gitFields } from '../lessons/state';
 import type { Lesson, LessonState } from '../lessons/types';
 import type { Lang } from '../i18n';
+import {
+  bootstrapSession,
+  clearSavedSession,
+  projectGit,
+  writeSavedSession,
+  type Session,
+  type TermEntry,
+} from './session';
 
-export interface TermEntry {
-  id: number;
-  kind: 'cmd' | 'out' | 'note';
-  prompt?: string;
-  lines: OutLine[];
-}
-
-export interface RunOutput {
-  stdout: string;
-  stderr: string;
-  error?: string;
-  ms: number;
-  path: string;
-}
-
-export interface Session {
-  files: Record<string, string>;
-  active: string;
-  term: TermEntry[];
-  history: string[];
-  done: string[];
-  missionIndex: number;
-  hintOpen: boolean;
-  free: boolean;
-  runs: number;
-  lastCmd: string;
-  lastStdout: string;
-  lastStderr: string;
-  lastRun: RunOutput | null;
-  gitSnap: ReturnType<GitRepo['snapshot']> | null;
-}
+export type { RunOutput, Session, TermEntry } from './session';
 
 export interface Toast {
   ids?: string[];
@@ -58,51 +51,22 @@ const nextId = () => {
   return entryId;
 };
 
-const progressKey = (lessonId: string) => `visna-sol:progress:${lessonId}`;
+/** How long a run may take before the worker is killed. */
+const RUN_TIMEOUT_MS = 20_000;
 
-const readProgress = (lessonId: string): string[] => {
-  try {
-    const raw = localStorage.getItem(progressKey(lessonId));
-    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch {
-    return [];
-  }
-};
-
-const writeProgress = (lessonId: string, done: string[]) => {
-  try {
-    localStorage.setItem(progressKey(lessonId), JSON.stringify(done));
-  } catch {
-    /* private windows: progress is a nicety, never a requirement */
-  }
-};
-
-const makeSession = (lesson: Lesson): Session => ({
-  files: { ...lesson.files },
-  active: lesson.entry,
-  term: [],
-  history: [],
-  done: readProgress(lesson.id),
-  missionIndex: 0,
-  hintOpen: false,
-  free: false,
-  runs: 0,
-  lastCmd: '',
-  lastStdout: '',
-  lastStderr: '',
-  lastRun: null,
-  gitSnap: null,
-});
-
+/**
+ * Mission checks see the last run only when that run finished cleanly: a crash,
+ * a SyntaxError or a stop is not "my program worked".
+ */
 const lessonState = (lesson: Lesson, session: Session): LessonState => {
   const snap = lesson.runtime === 'git' ? session.gitSnap : null;
+  const ran = session.lastRun?.ok === true;
   return {
     runtime: lesson.runtime,
     files: session.files,
     active: session.active,
     runs: session.runs,
-    stdout: session.lastStdout,
+    stdout: ran ? session.lastStdout : '',
     stderr: session.lastStderr,
     history: session.history,
     lastCommand: session.lastCmd,
@@ -122,6 +86,7 @@ export interface SandboxApi {
   toast: Toast | null;
   submit: (command: string) => Promise<void>;
   runActive: () => Promise<void>;
+  stopRun: () => void;
   setFile: (path: string, content: string) => void;
   openFile: (path: string) => void;
   createFile: (path: string) => void;
@@ -135,24 +100,31 @@ export interface SandboxApi {
 }
 
 export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
-  const [session, setSession] = useState<Session>(() => makeSession(lesson));
+  const boot = useRef<{ session: Session; repo: GitRepo | null } | null>(null);
+  if (boot.current === null) boot.current = bootstrapSession(lesson);
+
+  const [session, setSession] = useState<Session>(boot.current.session);
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
   const [running, setRunning] = useState(false);
+  const runningRef = useRef(false);
   const [pyProgress, setPyProgress] = useState<PythonProgress>({ stage: 'idle', percent: 0 });
   const [toast, setToast] = useState<Toast | null>(null);
   const toastTimer = useRef<number | null>(null);
   const langRef = useRef(lang);
   langRef.current = lang;
 
-  const engine = useRef<GitRepo | null>(null);
+  const engine = useRef<GitRepo | null>(boot.current.repo);
+  /** Bumped whenever the lesson is restarted, so late results are dropped. */
+  const generation = useRef(0);
+  const saveTimer = useRef<number | null>(null);
   const config = RUNTIMES[lesson.runtime];
 
   const getGit = useCallback(() => {
-    if (!engine.current) engine.current = new GitRepo({ ...lesson.files });
+    if (!engine.current) engine.current = new GitRepo({ ...sessionRef.current.files });
     return engine.current;
-  }, [lesson.files]);
+  }, []);
 
   const notify = useCallback((message: Toast) => {
     setToast(message);
@@ -160,11 +132,28 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     toastTimer.current = window.setTimeout(() => setToast(null), 3800);
   }, []);
 
+  const persist = useCallback(
+    (next: Session) => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      const repo = lesson.runtime === 'git' ? engine.current : null;
+      saveTimer.current = window.setTimeout(() => {
+        writeSavedSession(lesson.id, next, repo);
+      }, 200);
+    },
+    [lesson.id, lesson.runtime],
+  );
+
   useEffect(
     () => () => {
       if (toastTimer.current) window.clearTimeout(toastTimer.current);
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      // Leaving the lesson stops a program that is still running.
+      generation.current += 1;
+      disposePython();
+      const last = sessionRef.current;
+      writeSavedSession(lesson.id, last, lesson.runtime === 'git' ? engine.current : null);
     },
-    [],
+    [lesson.id, lesson.runtime],
   );
 
   const commit = useCallback(
@@ -194,20 +183,31 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
             missionIndex: nextTodo === -1 ? lesson.missions.length : nextTodo,
             hintOpen: false,
           };
-          writeProgress(lesson.id, done);
         }
       }
       sessionRef.current = evaluated;
       setSession(evaluated);
+      persist(evaluated);
       return evaluated;
     },
-    [lesson, notify],
+    [lesson, notify, persist],
   );
 
   const withGitSnapshot = useCallback(
     (next: Session): Session =>
       lesson.runtime === 'git' ? { ...next, gitSnap: getGit().snapshot() } : next,
     [lesson.runtime, getGit],
+  );
+
+  /** Working tree → editor. Called after every Git command. */
+  const syncFromGit = useCallback(
+    (next: Session): Session => {
+      if (lesson.runtime !== 'git') return next;
+      const repo = getGit();
+      const projected = projectGit(repo, next.active, lesson.entry);
+      return { ...next, files: projected.files, active: projected.active, gitSnap: repo.snapshot() };
+    },
+    [lesson.runtime, lesson.entry, getGit],
   );
 
   const runPythonFile = useCallback(
@@ -222,22 +222,52 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
           session: current,
         };
       }
+      if (runningRef.current) {
+        return {
+          result: { lines: [out(langRef.current === 'ko' ? '이미 실행 중입니다. 끝나거나 중단될 때까지 기다려 주세요.' : 'A program is already running — wait for it to finish or press Stop.', 'warn')], exit: 1 },
+          session: current,
+        };
+      }
+      const generationAtStart = generation.current;
+      runningRef.current = true;
       setRunning(true);
       const poll = window.setInterval(() => setPyProgress({ ...pythonStatus() }), 200);
       try {
-        const run = await runPython(code);
+        const run = await runPython(code, current.files, file, { timeoutMs: RUN_TIMEOUT_MS });
         setPyProgress({ ...pythonStatus() });
+        if (generationAtStart !== generation.current) {
+          // The learner restarted the lesson while this program was running.
+          return { result: { lines: [], exit: 0 }, session: current };
+        }
         const lines: OutLine[] = [];
         if (run.stdout) run.stdout.split('\n').forEach((line) => lines.push(out(line)));
         if (run.stderr) run.stderr.split('\n').forEach((line) => lines.push(out(line, 'err')));
-        if (run.error) run.error.split('\n').forEach((line) => lines.push(out(line, 'err')));
+        if (run.error === 'cancelled') {
+          lines.push(out(langRef.current === 'ko' ? '실행을 중단했습니다.' : 'Run stopped.', 'warn'));
+        } else if (run.error === 'timeout') {
+          lines.push(out(langRef.current === 'ko' ? `실행 시간이 ${RUN_TIMEOUT_MS / 1000}초를 넘어 중단했습니다.` : `Stopped after ${RUN_TIMEOUT_MS / 1000}s.`, 'warn'));
+        } else if (run.error === 'busy') {
+          lines.push(out(langRef.current === 'ko' ? '이미 실행 중입니다.' : 'Already running.', 'warn'));
+        } else if (run.error) {
+          run.error.split('\n').forEach((line) => lines.push(out(line, 'err')));
+        }
         lines.push(out(`— ${run.ms} ms`, 'dim'));
         return {
-          result: { lines, exit: run.error ? 1 : 0 },
+          result: { lines, exit: run.ok ? 0 : 1 },
           session: {
             ...current,
-            runs: current.runs + 1,
-            lastRun: { stdout: run.stdout, stderr: run.stderr, error: run.error, ms: run.ms, path: file },
+            // A run that raised or was stopped is not progress.
+            runs: run.ok ? current.runs + 1 : current.runs,
+            lastRun: {
+              stdout: run.stdout,
+              stderr: run.stderr,
+              error: run.error,
+              ms: run.ms,
+              path: file,
+              ok: run.ok,
+              cancelled: run.stoppedBy === 'user',
+              timedOut: run.stoppedBy === 'timeout',
+            },
             lastStdout: run.stdout,
             lastStderr: run.stderr,
             lastCmd: command,
@@ -245,6 +275,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         };
       } finally {
         window.clearInterval(poll);
+        runningRef.current = false;
         setRunning(false);
       }
     },
@@ -304,6 +335,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     async (command: string) => {
       const text = command.trim();
       if (!text) return;
+      const generationAtStart = generation.current;
       const current = sessionRef.current;
       const echoed: TermEntry = {
         id: nextId(),
@@ -316,21 +348,25 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
 
       if (lesson.runtime === 'git') {
         result = getGit().exec(text);
-        next = { ...next, lastStdout: result.lines.map((line) => line.text).join('\n') };
+        // The command may have rewritten the working tree (switch, merge, reset,
+        // restore, rm) — the editor follows it immediately.
+        next = syncFromGit({ ...next, lastStdout: result.lines.map((line) => line.text).join('\n') });
       } else {
         const python = await pythonTerminal(current, text);
+        if (generationAtStart !== generation.current) return;
         result = python.result;
         next = { ...python.session, history: [...current.history, text] };
       }
 
       const entries: TermEntry[] = [echoed, { id: nextId(), kind: 'out', lines: result.lines }];
       next = result.clear ? { ...next, term: [] } : { ...next, term: [...next.term, ...entries].slice(-400) };
-      commit(withGitSnapshot(next));
+      commit(next);
     },
-    [config.prompt, lesson.runtime, getGit, pythonTerminal, commit, withGitSnapshot],
+    [config.prompt, lesson.runtime, getGit, pythonTerminal, commit, syncFromGit],
   );
 
   const runActive = useCallback(async () => {
+    if (runningRef.current) return;
     const path = sessionRef.current.active;
     if (lesson.runtime === 'git') {
       await submit('git status');
@@ -340,22 +376,56 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     await submit(`python ${path}`);
   }, [lesson.runtime, submit]);
 
+  const stopRun = useCallback(() => {
+    if (!runningRef.current) return;
+    if (!cancelPython()) return;
+    // Anything the stopped run would have reported is no longer wanted.
+    generation.current += 1;
+    runningRef.current = false;
+    setRunning(false);
+    const current = sessionRef.current;
+    const note: TermEntry = {
+      id: nextId(),
+      kind: 'note',
+      lines: [out(langRef.current === 'ko' ? '실행을 중단했습니다.' : 'Run stopped.', 'warn')],
+    };
+    commit({
+      ...current,
+      term: [...current.term, note].slice(-400),
+      lastRun: {
+        stdout: '',
+        stderr: '',
+        error: 'cancelled',
+        ms: 0,
+        path: current.active,
+        ok: false,
+        cancelled: true,
+      },
+    });
+  }, [commit]);
+
   const setFile = useCallback(
     (path: string, content: string) => {
       const current = sessionRef.current;
       if (current.files[path] === content) return;
       if (lesson.runtime === 'git') getGit().workdir[path] = content;
-      commit(withGitSnapshot({ ...current, files: { ...current.files, [path]: content } }));
+      const files = repositoryFiles(lesson.runtime, getGit, { ...current.files, [path]: content });
+      commit(withGitSnapshot({ ...current, files }));
     },
     [lesson.runtime, getGit, commit, withGitSnapshot],
   );
 
-  const openFile = useCallback((path: string) => {
-    const current = sessionRef.current;
-    if (!(path in current.files)) return;
-    sessionRef.current = { ...current, active: path };
-    setSession(sessionRef.current);
-  }, []);
+  const openFile = useCallback(
+    (path: string) => {
+      const current = sessionRef.current;
+      if (!(path in current.files)) return;
+      const next = { ...current, active: path };
+      sessionRef.current = next;
+      setSession(next);
+      persist(next);
+    },
+    [persist],
+  );
 
   const createFile = useCallback(
     (path: string) => {
@@ -374,7 +444,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       if (Object.keys(current.files).length <= 1) return;
       const files = { ...current.files };
       delete files[path];
-      const active = current.active === path ? Object.keys(files)[0] : current.active;
+      const active = current.active === path ? Object.keys(files).sort()[0] : current.active;
       if (lesson.runtime === 'git') {
         delete getGit().workdir[path];
         delete getGit().index[path];
@@ -384,13 +454,26 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     [lesson.runtime, getGit, commit, withGitSnapshot],
   );
 
-  const resetFiles = useCallback(() => {
+  const restartEngine = useCallback(() => {
+    generation.current += 1;
+    if (runningRef.current) cancelPython();
+    runningRef.current = false;
+    setRunning(false);
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
     engine.current = lesson.runtime === 'git' ? new GitRepo({ ...lesson.files }) : null;
+  }, [lesson.files, lesson.runtime]);
+
+  const resetFiles = useCallback(() => {
+    restartEngine();
     const current = sessionRef.current;
+    const files = { ...lesson.files };
     commit(
       withGitSnapshot({
         ...current,
-        files: { ...lesson.files },
+        files,
         active: lesson.entry,
         runs: 0,
         lastRun: null,
@@ -403,16 +486,17 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     notify({
       text: langRef.current === 'ko' ? '강의 파일을 처음 상태로 되돌렸습니다' : 'Lesson files are back to their starting state',
     });
-  }, [lesson, commit, withGitSnapshot, notify]);
+  }, [lesson, commit, withGitSnapshot, notify, restartEngine]);
 
   const resetLesson = useCallback(() => {
-    engine.current = lesson.runtime === 'git' ? new GitRepo({ ...lesson.files }) : null;
-    writeProgress(lesson.id, []);
-    commit(withGitSnapshot({ ...makeSession(lesson), done: [] }));
+    restartEngine();
+    clearSavedSession(lesson.id);
+    const fresh = bootstrapSession(lesson).session;
+    commit(withGitSnapshot({ ...fresh, term: [], history: [], done: [], missionIndex: 0, free: false, runs: 0, lastRun: null }));
     notify({
       text: langRef.current === 'ko' ? '이 강의를 처음부터 다시 시작합니다' : 'This lesson started over from the beginning',
     });
-  }, [lesson, commit, withGitSnapshot, notify]);
+  }, [lesson, commit, withGitSnapshot, notify, restartEngine]);
 
   const clearTerminal = useCallback(() => {
     sessionRef.current = { ...sessionRef.current, term: [] };
@@ -441,9 +525,8 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
           return matches.length === 1 ? `git ${matches[0]} ` : null;
         }
         if (tokens[1] === 'switch' || tokens[1] === 'merge' || tokens[1] === 'checkout') {
-          const snap = current.gitSnap;
-          const names = (snap?.branches ?? []).map((branch) => branch.name).filter((name) => name.startsWith(last));
-          if (names.length === 1) return substitute(names[0]);
+          const branchNames = (current.gitSnap?.branches ?? []).map((branch) => branch.name).filter((name) => name.startsWith(last));
+          if (branchNames.length === 1) return substitute(branchNames[0]);
         }
       }
       const files = Object.keys(current.files).filter((file) => file.startsWith(last));
@@ -483,6 +566,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       toast,
       submit,
       runActive,
+      stopRun,
       setFile,
       openFile,
       createFile,
@@ -495,8 +579,13 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       toggleHint,
     }),
     [
-      lesson, runtime, session, activeMission, running, pyProgress, toast, submit, runActive, setFile,
+      lesson, runtime, session, activeMission, running, pyProgress, toast, submit, runActive, stopRun, setFile,
       openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete, selectMission, toggleHint,
     ],
   );
+}
+
+/** For a Git lesson the working tree wins over an editor-side file map. */
+function repositoryFiles(runtime: RuntimeId, getGit: () => GitRepo, files: Record<string, string>) {
+  return runtime === 'git' ? { ...getGit().workdir } : files;
 }
