@@ -176,6 +176,31 @@ git merge feature
 - `fatal: not a git repository` — 아직 `git init` 을 하지 않았습니다.
 - `nothing to commit` — 변경이 없거나 `git add` 를 잊었습니다.
 - `CONFLICT` — 같은 줄을 양쪽에서 고쳤습니다. `<<<<<<<`, `=======`, `>>>>>>>` 표시를 지우고 원하는 내용만 남긴 뒤 `git add .`, `git commit -m "merge"` 를 실행하세요.
+- `Your local changes … would be overwritten by checkout` — 커밋하지 않은 수정이 있어
+  브랜치를 바꾸면 그 수정이 지워질 상황입니다. 실제 Git 처럼 **전환이 중단**되므로,
+  먼저 커밋하거나 `git switch -f feature` 로 버릴지 결정하세요. (merge 에서도 같은
+  보호가 동작합니다.)
+- `cannot rebase: You have unstaged changes` — rebase 전에 작업 트리를 정리해야 합니다.
 - 실습을 처음부터 다시 하려면 오른쪽 위 `⋮` 메뉴에서 **강의 파일 초기화**를 고르세요.
 
 네 미션을 모두 마치면 **자유 실습**에서 rebase 나 reset 같은 명령도 시험해 보세요.
+
+## 이 실습 엔진이 단순화한 부분
+
+이 코스의 Git 은 브라우저 안에서 움직이는 **교육용 엔진**입니다. 명령과 결과는 실제
+Git 과 같게 동작하지만, 다음은 일부러 단순하게 만들었습니다. 실제 저장소에서 같은
+명령을 쓸 때 이 차이만 기억하면 됩니다.
+
+| 실제 Git | 이 실습 엔진 |
+| --- | --- |
+| 객체·팩파일 단위로 내용을 저장 | 커밋마다 **폴더 전체 스냅샷**을 저장 |
+| 줄 단위 3-way 병합 | 파일 단위로 비교하고, 양쪽이 다르면 충돌 표시를 넣음 |
+| 40자리 SHA-1 해시 | 보기 쉽게 8자리 짧은 해시 |
+| `git stash`, `reflog`, `remote`, `push`, `pull`, 훅 | 지원하지 않음 |
+| rebase 충돌 시 `--continue` / `--abort` 로 이어서 진행 | 충돌하면 **전체를 원래대로 되돌림**(처음부터 다시 시도) |
+| 파일 모드·심볼릭 링크·서브모듈·`.gitignore` | 지원하지 않음 |
+| 작성자·시간이 실제 사용자 정보 | 학습자 고정 작성자와 연습용 시간 |
+
+그래도 `add` / `commit` / `branch` / `switch` / `merge` / `rebase` / `reset` 의
+**동작 규칙**은 실제 Git 과 같습니다. 특히 커밋하지 않은 변경을 보호하는 규칙
+(전환·병합 거부, `reset --hard` 가 추적되지 않은 파일을 남기는 것)은 그대로입니다.

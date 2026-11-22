@@ -1,7 +1,7 @@
 import { useMemo, useRef } from 'react';
 import { t, type Lang } from '../i18n';
 import type { RuntimeId } from '../tracks/types';
-import { IconPlay } from './Icons';
+import { IconPlay, IconStop } from './Icons';
 import { langForPath, tokenize } from './highlight';
 
 interface EditorProps {
@@ -13,9 +13,10 @@ interface EditorProps {
   onChange: (value: string) => void;
   onOpen: (path: string) => void;
   onRun: () => void;
+  onStop: () => void;
 }
 
-export function Editor({ lang, runtime, files, active, running, onChange, onOpen, onRun }: EditorProps) {
+export function Editor({ lang, runtime, files, active, running, onChange, onOpen, onRun, onStop }: EditorProps) {
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
   const code = files[active] ?? '';
@@ -67,16 +68,23 @@ export function Editor({ lang, runtime, files, active, running, onChange, onOpen
           <span className="kbd-hint" title={t(lang, 'stopHint')}>
             ⌘/Ctrl + ↵
           </span>
-          <button
-            type="button"
-            className={`run-btn${running ? ' busy' : ''}`}
-            onClick={onRun}
-            disabled={running}
-            data-testid="run"
-          >
-            <IconPlay size={12} />
-            {running ? t(lang, 'running') : runLabel}
-          </button>
+          {running ? (
+            <button
+              type="button"
+              className="run-btn stop"
+              onClick={onStop}
+              data-testid="stop"
+              title={t(lang, 'stopHintRun')}
+            >
+              <IconStop size={12} />
+              {t(lang, 'stop')}
+            </button>
+          ) : (
+            <button type="button" className="run-btn" onClick={onRun} data-testid="run">
+              <IconPlay size={12} />
+              {runLabel}
+            </button>
+          )}
         </div>
       </div>
       <div className="editor-body">

@@ -14,9 +14,10 @@ export function PythonOutput({
   progress: PythonProgress;
   running: boolean;
 }) {
-  const loading = running && (progress.stage === 'script' || progress.stage === 'runtime');
+  const loading = running && (progress.stage === 'script' || progress.stage === 'runtime') && !(run && !run.ok);
+  const failed = !!run && !run.ok;
   return (
-    <div className="viz-card" data-testid="output-card">
+    <div className="viz-card" data-testid="output-card" data-state={failed ? 'error' : 'ok'}>
       <div className="viz-head">
         <span>{t(lang, 'outputPython')}</span>
         {run && <span className="viz-meta">{run.ms} ms</span>}
@@ -38,6 +39,11 @@ export function PythonOutput({
         <p className="viz-error">{t(lang, 'pyOffline')}</p>
       ) : run ? (
         <>
+          {failed && (
+            <p className="viz-error" data-testid="py-failed">
+              {run.cancelled ? t(lang, 'pyStopped') : run.timedOut ? t(lang, 'pyTimeout') : t(lang, 'pyFailed')}
+            </p>
+          )}
           <p className="viz-note">
             {run.path} · {run.ms} ms
           </p>

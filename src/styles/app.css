@@ -644,6 +644,11 @@ img {
   background: var(--surface-3);
   color: var(--muted);
 }
+/* While a program runs the same button becomes Stop, in the error colour. */
+.run-btn.stop {
+  background: var(--error);
+  color: #fff;
+}
 
 .editor-body {
   flex: 1;

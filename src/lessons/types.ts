@@ -64,6 +64,6 @@ export interface LessonState {
   gitTotalCommits: number;
   gitMergeCommits: number;
   gitBranch: string | null;
-  gitBranches: { name: string; sha: string | null }[];
+  gitBranches: { name: string; sha: string | null; ahead?: number }[];
   gitMainTip: string | null;
 }

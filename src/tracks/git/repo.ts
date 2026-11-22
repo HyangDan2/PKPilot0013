@@ -6,6 +6,19 @@
  * It keeps whole-tree snapshots per commit (this is a teaching sandbox, not a
  * packfile implementation), which makes three-way merges, rebases and resets
  * easy to reason about — and easy to render as a commit graph.
+ *
+ * Source of truth: for a Git lesson the repository's `workdir` is the only
+ * authority for file content. The React session keeps a projection of it
+ * (`session.files`) that is rewritten from `workdir` after every command, so the
+ * editor and the terminal can never disagree about what a file holds.
+ *
+ * Two guarantees the rest of the app relies on:
+ *  1. `capture()` / `restore()` make every state-changing command atomic — a
+ *     command that reports failure leaves the repository exactly as it was.
+ *     The single exception is a conflicted `merge`, whose half-finished state is
+ *     the result the learner is meant to resolve.
+ *  2. `serialize()` / `fromState()` round-trip the whole repository, so a reload
+ *     restores commits, branches, the index and the working tree together.
  */
 import { type CommandResult, type OutLine, blank, fail, mix, out, result } from '../types';
 import { type FileDiff, diffStat, diffTrees, statLine } from './diff';
@@ -31,7 +44,8 @@ export interface GitSnapshot {
   initialized: boolean;
   head: { kind: 'branch' | 'detached'; label: string; sha: string | null };
   branch: string | null;
-  branches: { name: string; sha: string | null; current: boolean }[];
+  /** `ahead` = commits reachable from the branch but not from main. */
+  branches: { name: string; sha: string | null; current: boolean; ahead: number }[];
   staged: StatusEntry[];
   unstaged: StatusEntry[];
   untracked: string[];
@@ -41,8 +55,25 @@ export interface GitSnapshot {
   stats: { commits: number; merges: number; rebases: number };
 }
 
+/** Everything a repository is, as plain JSON — for rollback and for a reload. */
+export interface GitRepoState {
+  version: 1;
+  initialized: boolean;
+  workdir: Record<string, string>;
+  index: Record<string, string>;
+  commits: Record<string, Commit>;
+  branches: Record<string, string | null>;
+  head: Head;
+  mergePending: string | null;
+  stats: { commits: number; merges: number; rebases: number };
+  clock: number;
+  serial: number;
+  previousBranch: string | null;
+}
+
 const AUTHOR = 'HD2Lab Learner <learner@hd2lab.dev>';
 const DEFAULT_BRANCH = 'main';
+const STATE_VERSION = 1;
 
 const tokenize = (input: string): string[] => {
   const tokens: string[] = [];
@@ -99,6 +130,87 @@ export class GitRepo {
 
   constructor(seed: Record<string, string>) {
     this.workdir = { ...seed };
+  }
+
+  // ── state as a value (rollback · persistence) ───────────────────────
+  capture(): GitRepoState {
+    const tree = (source: Record<string, string>) => Object.fromEntries(Object.entries(source));
+    return {
+      version: STATE_VERSION,
+      initialized: this.initialized,
+      workdir: tree(this.workdir),
+      index: tree(this.index),
+      commits: Object.fromEntries(
+        Object.entries(this.commits).map(([sha, commit]) => [
+          sha,
+          { ...commit, parents: [...commit.parents], tree: tree(commit.tree) },
+        ]),
+      ),
+      branches: { ...this.branches },
+      head: { ...this.head },
+      mergePending: this.mergePending,
+      stats: { ...this.stats },
+      clock: this.clock,
+      serial: this.serial,
+      previousBranch: this.previousBranch,
+    };
+  }
+
+  restore(state: GitRepoState): void {
+    const copy = JSON.parse(JSON.stringify(state)) as GitRepoState;
+    this.initialized = copy.initialized;
+    this.workdir = copy.workdir;
+    this.index = copy.index;
+    this.commits = copy.commits;
+    this.branches = copy.branches;
+    this.head = copy.head;
+    this.mergePending = copy.mergePending;
+    this.stats = copy.stats;
+    this.clock = copy.clock;
+    this.serial = copy.serial;
+    this.previousBranch = copy.previousBranch;
+  }
+
+  /** The whole repository as JSON, safe for localStorage. */
+  serialize(): GitRepoState {
+    return this.capture();
+  }
+
+  /** Rebuilds a repository from `serialize()` output; null when it is not usable. */
+  static fromState(raw: unknown): GitRepo | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const state = raw as Partial<GitRepoState>;
+    if (state.version !== STATE_VERSION) return null;
+    const stringMap = (value: unknown): value is Record<string, string> =>
+      !!value && typeof value === 'object' && Object.values(value as Record<string, unknown>).every((item) => typeof item === 'string');
+    if (!stringMap(state.workdir) || !stringMap(state.index)) return null;
+    if (!state.commits || typeof state.commits !== 'object') return null;
+    if (!state.branches || typeof state.branches !== 'object') return null;
+    const head = state.head as Head | undefined;
+    if (!head || (head.kind !== 'branch' && head.kind !== 'detached')) return null;
+    if (head.kind === 'branch' && typeof head.name !== 'string') return null;
+    if (head.kind === 'detached' && typeof head.sha !== 'string') return null;
+    if (typeof state.initialized !== 'boolean') return null;
+    const repo = new GitRepo({});
+    repo.restore({
+      version: STATE_VERSION,
+      initialized: state.initialized,
+      workdir: state.workdir,
+      index: state.index,
+      commits: state.commits as Record<string, Commit>,
+      branches: state.branches as Record<string, string | null>,
+      head,
+      mergePending: typeof state.mergePending === 'string' ? state.mergePending : null,
+      stats: {
+        commits: Number(state.stats?.commits ?? 0),
+        merges: Number(state.stats?.merges ?? 0),
+        rebases: Number(state.stats?.rebases ?? 0),
+      },
+      clock: Number(state.clock ?? Date.now()),
+      serial: Number(state.serial ?? 0),
+      previousBranch: typeof state.previousBranch === 'string' ? state.previousBranch : null,
+    });
+    return repo;
   }
 
   // ── refs & trees ───────────────────────────────────────────────────────────
@@ -186,9 +298,10 @@ export class GitRepo {
   }
 
   unstagedEntries(): StatusEntry[] {
-    const tracked = this.statusList(this.index, this.workdir);
     if (Object.keys(this.headTree()).length === 0 && Object.keys(this.index).length === 0) return [];
-    return tracked;
+    // Only files git already tracks can be "modified"; anything else is untracked.
+    const tracked = new Set([...Object.keys(this.index), ...Object.keys(this.headTree())]);
+    return this.statusList(this.index, this.workdir).filter((entry) => tracked.has(entry.path));
   }
 
   untrackedFiles(): string[] {
@@ -221,7 +334,7 @@ export class GitRepo {
       },
       branch: currentName,
       branches: Object.entries(this.branches)
-        .map(([name, sha]) => ({ name, sha, current: name === currentName }))
+        .map(([name, sha]) => ({ name, sha, current: name === currentName, ahead: this.aheadOf(sha) }))
         .sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name)),
       staged: this.stagedEntries(),
       unstaged: this.unstagedEntries(),
@@ -284,6 +397,15 @@ export class GitRepo {
 
   private isAncestor(maybeAncestor: string | null, sha: string | null): boolean {
     return !!maybeAncestor && this.ancestors(sha).has(maybeAncestor);
+  }
+
+  /** How many commits this branch has that main does not — the branch mission reads it. */
+  private aheadOf(sha: string | null): number {
+    if (!this.hasCommit(sha)) return 0;
+    const mainSet = this.ancestors(this.branches[DEFAULT_BRANCH] ?? null);
+    let count = 0;
+    for (const id of this.ancestors(sha)) if (!mainSet.has(id)) count += 1;
+    return count;
   }
 
   // ── three-way merge ────────────────────────────────────────────────────────
@@ -357,6 +479,18 @@ export class GitRepo {
     if (sub !== 'init' && !this.initialized) {
       return fail([out(`fatal: not a git repository (or any of the parent directories): .git`, 'err')]);
     }
+    // A command that reports failure must leave the repository untouched, so the
+    // learner can read the error and try the same thing again. The single
+    // exception is a conflicted merge: its half-finished state *is* the result
+    // they are meant to resolve.
+    const keepOnFailure = sub === 'merge' && !args.includes('--abort');
+    const before = keepOnFailure ? null : this.capture();
+    const res = this.dispatch(sub, rest);
+    if (before && res.exit !== 0) this.restore(before);
+    return res;
+  }
+
+  private dispatch(sub: string, rest: string[]): CommandResult {
     switch (sub) {
       case 'init':
         return this.cmdInit();
@@ -456,40 +590,79 @@ export class GitRepo {
   }
 
   private cmdAdd(args: string[]): CommandResult {
+    const flags = args.filter((arg) => arg.startsWith('-'));
     const paths = args.filter((arg) => !arg.startsWith('-'));
-    if (paths.length === 0) {
+    const stageAll = flags.includes('-A') || flags.includes('--all');
+    const updateOnly = flags.includes('-u') || flags.includes('--update');
+    if (paths.length === 0 && !stageAll && !updateOnly) {
       return fail([out('Nothing specified, nothing added.', 'err'), out('hint: Maybe you wanted to say \'git add .\'?', 'dim')]);
     }
-    const lines: OutLine[] = [];
-    const all = paths.includes('.') || paths.includes('*') || args.includes('-A') || args.includes('--all');
-    if (all) {
+    const everything = paths.filter((path) => path === '.' || path === '*' || path === './');
+    const named = paths.filter((path) => !(path === '.' || path === '*' || path === './'));
+    // Like real git, a pathspec error aborts the whole command — nothing is staged.
+    const known = new Set([...Object.keys(this.workdir), ...Object.keys(this.index), ...Object.keys(this.headTree())]);
+    const missing = named.filter((path) => !known.has(path));
+    if (missing.length) {
+      return fail(missing.map((path) => out(`fatal: pathspec '${path}' did not match any files`, 'err')));
+    }
+    if (updateOnly) {
+      this.stageTrackedChanges();
+    }
+    if (stageAll || everything.length) {
+      // untracked files, edits and deletions in one go — deletions vanish from
+      // the index because the index becomes a copy of the working tree.
       this.index = { ...this.workdir };
-      return result([]);
     }
-    for (const path of paths) {
-      if (path in this.workdir) {
-        this.index[path] = this.workdir[path];
-      } else if (path in this.index) {
-        delete this.index[path];
-      } else {
-        lines.push(out(`fatal: pathspec '${path}' did not match any files`, 'err'));
-      }
+    for (const path of named) {
+      if (path in this.workdir) this.index[path] = this.workdir[path];
+      else delete this.index[path];
     }
-    return lines.length ? fail(lines) : result([]);
+    return result([]);
+  }
+
+  /** `add -u` and `commit -a`: only files git already tracks — never untracked ones. */
+  private stageTrackedChanges(): void {
+    const tracked = new Set([...Object.keys(this.index), ...Object.keys(this.headTree())]);
+    for (const path of tracked) {
+      if (path in this.workdir) this.index[path] = this.workdir[path];
+      else delete this.index[path];
+    }
   }
 
   private cmdCommit(args: string[]): CommandResult {
     let message: string | null = null;
+    let stageTracked = false;
     for (let i = 0; i < args.length; i += 1) {
       const arg = args[i];
-      if (arg === '-m' || arg === '--message') {
+      if (arg === '--message') {
         message = args[i + 1] ?? '';
         i += 1;
-      } else if (arg.startsWith('-m')) {
-        message = arg.slice(2);
-      } else if (arg === '-am' || arg === '-a') {
-        // handled below: stage every tracked change first
-        this.index = { ...this.index, ...Object.fromEntries(Object.keys(this.workdir).map((p) => [p, this.workdir[p]])) };
+        continue;
+      }
+      if (arg.startsWith('--message=')) {
+        message = arg.slice('--message='.length);
+        continue;
+      }
+      if (arg === '--all') {
+        stageTracked = true;
+        continue;
+      }
+      if (arg.startsWith('--')) continue;
+      if (!arg.startsWith('-') || arg.length === 1) continue;
+      // Short flag cluster: -a, -m, -am, -ma, -m"message".
+      for (let k = 1; k < arg.length; k += 1) {
+        const char = arg[k];
+        if (char === 'a') {
+          stageTracked = true;
+        } else if (char === 'm') {
+          const inline = arg.slice(k + 1);
+          if (inline) message = inline;
+          else {
+            message = args[i + 1] ?? '';
+            i += 1;
+          }
+          k = arg.length;
+        }
       }
     }
     if (message === null) {
@@ -498,9 +671,12 @@ export class GitRepo {
         out('hint: git commit -m "커밋 메시지" 형식으로 입력해 주세요.', 'dim'),
       ]);
     }
-    if (message.trim() === '') {
+    if ((message as string).trim() === '') {
       return fail([out('Aborting commit due to empty commit message.', 'err')]);
     }
+    // `-a` stages only after the message has been accepted, so a rejected commit
+    // never leaves a half-staged index behind.
+    if (stageTracked) this.stageTrackedChanges();
     const staged = this.stagedEntries();
     if (staged.length === 0) {
       const untracked = this.untrackedFiles().length;
@@ -591,10 +767,12 @@ export class GitRepo {
   private cmdCheckout(args: string[], flavor: 'switch' | 'checkout'): CommandResult {
     let create = false;
     let detach = false;
+    let force = false;
     const names: string[] = [];
     for (const arg of args) {
-      if (arg === '-b' || arg === '-c' || arg === '-C') create = true;
+      if (arg === '-b' || arg === '-c' || arg === '-C' || arg === '-B') create = true;
       else if (arg === '--detach' || arg === '-d') detach = true;
+      else if (arg === '-f' || arg === '--force' || arg === '--discard-changes') force = true;
       else if (!arg.startsWith('-')) names.push(arg);
     }
     const target = names[0];
@@ -603,87 +781,158 @@ export class GitRepo {
         out(`fatal: ${flavor === 'switch' ? "missing branch or commit argument" : "you must specify path(s) to restore"}`, 'err'),
       ]);
     }
+
     if (create) {
       if (target in this.branches) return fail([out(`fatal: a branch named '${target}' already exists`, 'err')]);
-      const start = this.resolve(names[1]) ?? this.headSha();
+      const startRef = names[1];
+      const start = startRef ? this.resolve(startRef) : this.headSha();
+      if (startRef && !this.hasCommit(start)) {
+        return fail([out(`fatal: invalid reference: ${startRef}`, 'err')]);
+      }
+      const tree = this.hasCommit(start) ? this.commits[start as string].tree : {};
+      const plan = this.localChangePlan(tree);
+      if (plan.blocked.length && !force) return this.blockedSwitch(plan.blocked);
+      this.applyCheckout({ ...tree }, plan.carried, force);
       this.branches[target] = start;
       this.previousBranch = this.branch;
       this.head = { kind: 'branch', name: target };
-      const tree = this.hasCommit(start) ? this.commits[start].tree : {};
-      const carry = this.dirtyWorkdir(tree);
-      this.workdir = { ...tree, ...carry };
-      this.index = { ...tree };
-      return result([out(`Switched to a new branch '${target}'`, 'ok')]);
+      return result(this.switchLines(`Switched to a new branch '${target}'`, plan.carried));
     }
+
     if (target === '-' || target in this.branches) {
       const name = target === '-' ? this.previousBranch : target;
       if (!name || !(name in this.branches)) return fail([out('fatal: invalid reference: -', 'err')]);
-      return this.checkoutBranch(name);
+      return this.switchToBranch(name, force);
     }
+
     const sha = this.resolve(target);
-    if (!sha || !detach) {
+    if (!sha || !this.hasCommit(sha)) {
       return fail([
         out(`fatal: invalid reference: ${target}`, 'err'),
         out(`hint: 브랜치를 전환하려면 존재하는 브랜치 이름을 입력해 주세요.`, 'dim'),
       ]);
     }
-    const lines: OutLine[] = [
+    // `git switch <sha>` needs --detach; plain `git checkout <sha>` detaches by itself.
+    if (flavor === 'switch' && !detach) {
+      return fail([
+        out(`fatal: a branch is expected, got commit '${target}'`, 'err'),
+        out(`hint: 커밋으로 이동하려면 git switch --detach ${sha.slice(0, 7)} 를 입력해 주세요.`, 'dim'),
+      ]);
+    }
+    const tree = this.commits[sha].tree;
+    const plan = this.localChangePlan(tree);
+    if (plan.blocked.length && !force) return this.blockedSwitch(plan.blocked);
+    this.applyCheckout({ ...tree }, plan.carried, force);
+    this.previousBranch = this.branch;
+    this.head = { kind: 'detached', sha };
+    return result([
       out(`Note: switching to '${sha.slice(0, 7)}'.`, 'warn'),
       blank(),
       out(`You are in 'detached HEAD' state. 실습 뒤에는 "git switch main"으로 돌아오세요.`, 'dim'),
       blank(),
-    ];
-    this.previousBranch = this.branch;
-    this.head = { kind: 'detached', sha };
-    const tree = this.commits[sha].tree;
-    this.workdir = { ...tree };
-    this.index = { ...tree };
-    lines.push(out(`HEAD is now at ${sha.slice(0, 7)} ${this.commits[sha].message}`, 'plain'));
-    return result(lines);
+      ...this.switchLines(undefined, plan.carried),
+      out(`HEAD is now at ${sha.slice(0, 7)} ${this.commits[sha].message}`, 'plain'),
+    ]);
   }
 
-  private dirtyWorkdir(target: Record<string, string>): Record<string, string> {
-    const carry: Record<string, string> = {};
-    const dirty = new Set([...this.unstagedEntries().map((e) => e.path), ...this.untrackedFiles()]);
-    for (const path of dirty) {
-      const current = this.workdir[path];
-      if (current !== target[path]) carry[path] = current;
-    }
-    return carry;
-  }
-
-  private checkoutBranch(name: string): CommandResult {
+  private switchToBranch(name: string, force: boolean): CommandResult {
     const sha = this.branches[name];
-    const tree = this.hasCommit(sha) ? this.commits[sha].tree : {};
-    const dirty = this.unstagedEntries().filter((entry) => this.headTree()[entry.path] !== tree[entry.path]);
-    if (dirty.length) {
-      return fail([
-        out(`error: Your local changes to the following files would be overwritten by checkout:`, 'err'),
-        ...dirty.map((entry) => out(`\t${entry.path}`, 'err')),
-        out('Please commit your changes or stash them before you switch branches.', 'dim'),
-        out('Aborting', 'err'),
-      ]);
-    }
-    const carry = this.dirtyWorkdir(tree);
+    const tree = this.hasCommit(sha) ? this.commits[sha as string].tree : {};
+    const plan = this.localChangePlan(tree);
+    if (plan.blocked.length && !force) return this.blockedSwitch(plan.blocked);
+    this.applyCheckout({ ...tree }, plan.carried, force);
     this.previousBranch = this.branch;
     this.head = { kind: 'branch', name };
-    this.workdir = { ...tree, ...carry };
-    this.index = { ...tree, ...Object.fromEntries(Object.entries(carry).filter(([path]) => path in this.index)) };
-    const lines: OutLine[] = [out(`Switched to branch '${name}'`, 'ok')];
-    if (carry && Object.keys(carry).length) {
-      lines.push(out(`M\t${Object.keys(carry).join(', ')}`, 'warn'));
+    return result(this.switchLines(`Switched to branch '${name}'`, plan.carried));
+  }
+
+  /**
+   * Which local work a switch would keep, and which it would destroy. Real git
+   * carries every change that does not collide with the target branch and aborts
+   * the switch otherwise — never silently discarding either kind.
+   */
+  private localChangePlan(target: Record<string, string>): {
+    blocked: string[];
+    carried: Record<string, string | undefined>;
+  } {
+    const current = this.headTree();
+    const blocked: string[] = [];
+    const carried: Record<string, string | undefined> = {};
+    const paths = new Set([
+      ...Object.keys(current),
+      ...Object.keys(this.workdir),
+      ...Object.keys(this.index),
+      ...Object.keys(target),
+    ]);
+    for (const path of paths) {
+      const localTouched = this.workdir[path] !== current[path] || this.index[path] !== current[path];
+      if (!localTouched) continue;
+      const targetMoves = target[path] !== current[path];
+      if (targetMoves && !(this.workdir[path] === target[path] && this.index[path] === target[path])) {
+        blocked.push(path);
+        continue;
+      }
+      carried[path] = this.workdir[path];
     }
-    return result(lines);
+    blocked.sort();
+    return { blocked, carried };
+  }
+
+  private blockedSwitch(blocked: string[]): CommandResult {
+    return fail([
+      out(`error: Your local changes to the following files would be overwritten by checkout:`, 'err'),
+      ...blocked.map((path) => out(`\t${path}`, 'err')),
+      out('Please commit your changes or stash them before you switch branches.', 'dim'),
+      out('Aborting', 'err'),
+    ]);
+  }
+
+  /**
+   * Writes the target tree into the working tree and the index, layering the
+   * learner's own work on top unless they forced the switch.
+   */
+  private applyCheckout(
+    target: Record<string, string>,
+    carried: Record<string, string | undefined>,
+    force: boolean,
+  ): void {
+    const current = this.headTree();
+    const workdir: Record<string, string> = { ...target };
+    const index: Record<string, string> = { ...target };
+    if (!force) {
+      for (const [path, value] of Object.entries(carried)) {
+        if (value === undefined) delete workdir[path];
+        else workdir[path] = value;
+        // a staged change stays staged, exactly as it was before the switch
+        if (this.index[path] !== current[path]) {
+          if (this.index[path] === undefined) delete index[path];
+          else index[path] = this.index[path] as string;
+        }
+      }
+    }
+    this.workdir = workdir;
+    this.index = index;
+  }
+
+  private switchLines(headline: string | undefined, carried: Record<string, string | undefined>): OutLine[] {
+    const lines: OutLine[] = [];
+    if (headline) lines.push(out(headline, 'ok'));
+    const kept = Object.entries(carried)
+      .filter(([, value]) => value !== undefined)
+      .map(([path]) => path);
+    for (const path of kept) lines.push(out(`M\t${path}`, 'warn'));
+    return lines;
   }
 
   private cmdMerge(args: string[]): CommandResult {
-    const name = args.find((arg) => !arg.startsWith('-'));
     if (args.includes('--abort')) {
+      if (!this.mergePending) return fail([out('fatal: There is no merge to abort (MERGE_HEAD missing).', 'err')]);
       this.mergePending = null;
       this.workdir = { ...this.headTree() };
       this.index = { ...this.headTree() };
       return result([out('Merge aborted.', 'warn')]);
     }
+    const name = args.find((arg) => !arg.startsWith('-'));
     if (!name) return fail([out('fatal: No commit specified and merge.defaultToUpstream not set.', 'err')]);
     if (!(name in this.branches)) {
       return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
@@ -693,19 +942,20 @@ export class GitRepo {
     const theirSha = this.branches[name];
     if (!this.hasCommit(theirSha)) return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
     if (!this.hasCommit(ourSha)) {
-      return this.checkoutBranch(name);
+      return this.switchToBranch(name, false);
     }
     const base = this.mergeBase(ourSha, theirSha);
     if (base === theirSha) return result([out('Already up to date.', 'plain')]);
     if (base === ourSha) {
-      const theirs = this.commits[theirSha];
-      const diffs = diffTrees(this.commits[ourSha].tree, theirs.tree);
-      if (this.branch) this.branches[this.branch] = theirSha;
-      else this.head = { kind: 'detached', sha: theirSha };
-      this.workdir = { ...theirs.tree };
-      this.index = { ...theirs.tree };
+      const theirs = this.commits[theirSha as string];
+      const diffs = diffTrees(this.commits[ourSha as string].tree, theirs.tree);
+      const plan = this.localChangePlan(theirs.tree);
+      if (plan.blocked.length) return this.blockedMerge(plan.blocked);
+      this.applyTree(theirs.tree);
+      if (this.branch) this.branches[this.branch] = theirSha as string;
+      else this.head = { kind: 'detached', sha: theirSha as string };
       return result([
-        out(`Updating ${ourSha.slice(0, 7)}..${theirSha.slice(0, 7)}`, 'plain'),
+        out(`Updating ${ourSha.slice(0, 7)}..${(theirSha as string).slice(0, 7)}`, 'plain'),
         out('Fast-forward', 'ok'),
         ...diffs.map((diff) => out(` ${diff.path} | ${diff.additions + diff.deletions} ${'+'.repeat(Math.min(diff.additions, 12))}${'-'.repeat(Math.min(diff.deletions, 12))}`, 'dim')),
         out(statLine(diffStat(diffs)), 'plain'),
@@ -714,6 +964,9 @@ export class GitRepo {
 
     const baseTree = this.commits[base as string].tree;
     const { tree, conflicts } = this.mergeTree(baseTree, this.commits[ourSha].tree, this.commits[theirSha].tree, name);
+    // A merge must never quietly roll over work the learner has not committed.
+    const plan = this.localChangePlan(tree);
+    if (plan.blocked.length) return this.blockedMerge(plan.blocked);
     const lines: OutLine[] = [];
     for (const path of Object.keys(tree)) {
       if (conflicts.includes(path)) continue;
@@ -725,36 +978,91 @@ export class GitRepo {
       }
       lines.push(out('Automatic merge failed; fix conflicts and then commit the result.', 'err'));
       lines.push(out(`hint: 충돌 표시(<<<<<<<, =======, >>>>>>>)를 지우고 파일을 정리한 뒤 "git add ."와 "git commit -m \\"merge\\""를 실행해 주세요.`, 'dim'));
-      this.workdir = { ...tree };
+      // The one failure whose half-finished state must stay: the learner resolves
+      // the markers and commits the result themselves.
+      const workdir: Record<string, string> = { ...tree };
+      for (const [path, value] of Object.entries(plan.carried)) {
+        if (tree[path] !== this.commits[ourSha].tree[path]) continue;
+        if (value === undefined) delete workdir[path];
+        else workdir[path] = value;
+      }
+      this.workdir = workdir;
       this.mergePending = name;
       return fail(lines);
     }
-    const commit = this.createCommit(`Merge branch '${name}'`, tree, [ourSha, theirSha]);
+    this.applyTree(tree);
+    const commit = this.createCommit(`Merge branch '${name}'`, tree, [ourSha, theirSha as string]);
     if (this.branch) this.branches[this.branch] = commit.sha;
-    this.workdir = { ...tree };
-    this.index = { ...tree };
     const diffs = diffTrees(this.commits[ourSha].tree, tree);
     lines.push(out(`Merge made by the 'ort' strategy.`, 'ok'));
     lines.push(out(statLine(diffStat(diffs)), 'plain'));
     return result(lines);
   }
 
+  private blockedMerge(blocked: string[]): CommandResult {
+    return fail([
+      out('error: Your local changes to the following files would be overwritten by merge:', 'err'),
+      ...blocked.map((path) => out(`\t${path}`, 'err')),
+      out('Please commit your changes or stash them before you merge.', 'dim'),
+      out('Aborting', 'err'),
+    ]);
+  }
+
+  /**
+   * Writes a merged tree into the working tree and index, keeping the learner's
+   * own uncommitted and untracked files wherever the merge did not touch them.
+   */
+  private applyTree(target: Record<string, string>, keepLocal = true): void {
+    const current = this.headTree();
+    const workdir: Record<string, string> = { ...target };
+    const index: Record<string, string> = { ...target };
+    if (keepLocal) {
+      const paths = new Set([...Object.keys(current), ...Object.keys(this.workdir), ...Object.keys(this.index)]);
+      for (const path of paths) {
+        const localTouched = this.workdir[path] !== current[path] || this.index[path] !== current[path];
+        if (!localTouched) continue;
+        if (target[path] !== current[path]) continue;
+        if (this.workdir[path] === undefined) delete workdir[path];
+        else workdir[path] = this.workdir[path];
+        if (this.index[path] !== current[path]) {
+          if (this.index[path] === undefined) delete index[path];
+          else index[path] = this.index[path] as string;
+        }
+      }
+    }
+    this.workdir = workdir;
+    this.index = index;
+  }
+
   private cmdRebase(args: string[]): CommandResult {
     const name = args.find((arg) => !arg.startsWith('-'));
     if (!name) return fail([out('fatal: no upstream specified', 'err')]);
     if (args.includes('--abort')) {
-      return result([out('rebase: 취소할 진행 중인 rebase가 없습니다.', 'dim')]);
+      // A conflicting rebase is rolled back completely before it returns, so there
+      // is never a rebase in progress to abort.
+      return fail([out('fatal: No rebase in progress?', 'err')]);
     }
     const onto = name === 'HEAD' ? this.headSha() : this.resolve(name);
     if (!this.hasCommit(onto)) return fail([out(`fatal: invalid upstream '${name}'`, 'err')]);
     const ourSha = this.headSha();
     if (!this.hasCommit(ourSha)) return fail([out('fatal: 현재 브랜치에 커밋이 없습니다.', 'err')]);
+    if (this.stagedEntries().length) {
+      return fail([
+        out('error: cannot rebase: Your index contains uncommitted changes.', 'err'),
+        out('error: Please commit or stash them.', 'err'),
+      ]);
+    }
+    if (this.unstagedEntries().length) {
+      return fail([
+        out('error: cannot rebase: You have unstaged changes.', 'err'),
+        out('error: Please commit or stash them.', 'err'),
+      ]);
+    }
     const base = this.mergeBase(ourSha, onto);
     if (base === onto) return result([out(`Current branch ${this.branch ?? 'HEAD'} is up to date.`, 'plain')]);
     const replay = this.commitsSince(ourSha, onto);
     if (replay.length === 0) return result([out(`Current branch ${this.branch ?? 'HEAD'} is up to date.`, 'plain')]);
 
-    const original = { workdir: { ...this.workdir }, index: { ...this.index }, head: { ...this.head } };
     const lines: OutLine[] = [
       out('First, rewinding head to replay your work on top of it...', 'dim'),
     ];
@@ -764,9 +1072,8 @@ export class GitRepo {
       const parentTree = commit.parents[0] ? this.commits[commit.parents[0]].tree : {};
       const merged = this.mergeTree(parentTree, currentTree, commit.tree, 'rebase');
       if (merged.conflicts.length) {
-        this.workdir = { ...original.workdir };
-        this.index = { ...original.index };
-        this.head = original.head as Head;
+        // exec() restores the whole state on a failed exit — including the
+        // replay commits created so far and the counters they bumped.
         return fail([
           out(`error: could not apply ${commit.sha.slice(0, 7)}... ${commit.message}`, 'err'),
           ...merged.conflicts.map((path) => out(`CONFLICT (content): Merge conflict in ${path}`, 'err')),
@@ -792,14 +1099,24 @@ export class GitRepo {
     const soft = args.includes('--soft');
     const ref = args.find((arg) => !arg.startsWith('-')) ?? 'HEAD';
     const sha = this.resolve(ref);
-    if (!sha) return fail([out(`fatal: ambiguous argument '${ref}': unknown revision or path not in the working tree.`, 'err')]);
+    if (!sha || !this.hasCommit(sha)) {
+      return fail([out(`fatal: ambiguous argument '${ref}': unknown revision or path not in the working tree.`, 'err')]);
+    }
     const tree = this.commits[sha].tree;
+    // Files git never tracked survive every reset mode — that is what makes
+    // `reset --hard` a tool for tracked work instead of a delete-everything key.
+    const tracked = new Set([...Object.keys(this.headTree()), ...Object.keys(this.index)]);
+    const loose: Record<string, string> = {};
+    for (const [path, content] of Object.entries(this.workdir)) {
+      if (!tracked.has(path)) loose[path] = content;
+    }
     if (this.branch) this.branches[this.branch] = sha;
     else this.head = { kind: 'detached', sha };
     const lines: OutLine[] = [];
     if (hard) {
-      this.workdir = { ...tree };
+      this.workdir = { ...tree, ...loose };
       this.index = { ...tree };
+      this.mergePending = null;
       lines.push(out(`HEAD is now at ${sha.slice(0, 7)} ${this.commits[sha].message}`, 'ok'));
     } else if (!soft) {
       this.index = { ...tree };
@@ -908,12 +1225,19 @@ export class GitRepo {
         out('cherry-pick: 충돌로 중단했습니다. 변경 사항은 적용되지 않았습니다.', 'warn'),
       ]);
     }
+    const blocked = this.localChangePlan(merged.tree).blocked;
+    if (blocked.length) {
+      return fail([
+        out('error: Your local changes to the following files would be overwritten by merge:', 'err'),
+        ...blocked.map((path) => out(`\t${path}`, 'err')),
+        out('hint: 커밋하거나 되돌린 뒤 다시 시도해 주세요.', 'dim'),
+      ]);
+    }
     const parents = this.hasCommit(this.headSha()) ? [this.headSha() as string] : [];
+    this.applyTree(merged.tree);
     const created = this.createCommit(commit.message, merged.tree, parents);
     if (this.branch) this.branches[this.branch] = created.sha;
     else this.head = { kind: 'detached', sha: created.sha };
-    this.workdir = { ...merged.tree };
-    this.index = { ...merged.tree };
     return result([
       mix(`[${this.branch ?? 'detached'} `, { text: created.sha.slice(0, 7), tone: 'sha' }, `] ${commit.message}`),
       out(statLine(diffStat(diffTrees(parents[0] ? this.commits[parents[0]].tree : {}, merged.tree))), 'plain'),
@@ -925,6 +1249,11 @@ export class GitRepo {
     const paths = args.filter((arg) => !arg.startsWith('-')).filter((arg) => arg !== 'HEAD');
     if (paths.length === 0) return fail([out('fatal: you must specify path(s) to restore', 'err')]);
     const head = this.headTree();
+    // Validate every path first: a bad pathspec must not half-restore the rest.
+    const unknown = paths.filter((path) => !(path in this.index) && !(path in head) && !(path in this.workdir));
+    if (unknown.length) {
+      return fail(unknown.map((path) => out(`error: pathspec '${path}' did not match any file(s) known to git`, 'err')));
+    }
     for (const path of paths) {
       if (staged) {
         if (head[path] !== undefined) this.index[path] = head[path];
@@ -944,17 +1273,18 @@ export class GitRepo {
     const cached = args.includes('--cached');
     const paths = args.filter((arg) => !arg.startsWith('-'));
     if (!paths.length) return fail([out('fatal: No pathspec was given. Which files should I remove?', 'err')]);
+    // Validate every pathspec first — `git rm a b` removes neither when b is unknown.
+    const unknown = paths.filter((path) => !(path in this.index));
+    if (unknown.length) {
+      return fail(unknown.map((path) => out(`fatal: pathspec '${path}' did not match any files`, 'err')));
+    }
     const lines: OutLine[] = [];
     for (const path of paths) {
-      if (!(path in this.index)) {
-        lines.push(out(`fatal: pathspec '${path}' did not match any files`, 'err'));
-        continue;
-      }
       delete this.index[path];
       if (!cached) delete this.workdir[path];
       lines.push(out(`rm '${path}'`, 'plain'));
     }
-    return lines.some((line) => line.tone === 'err') ? fail(lines) : result(lines);
+    return result(lines);
   }
 
   private cmdShow(args: string[]): CommandResult {

@@ -87,6 +87,12 @@ export const IconPlay = (p: IconProps) => (
   </svg>
 );
 
+export const IconStop = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 export const IconChevron = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="m8 5 7 7-7 7" />

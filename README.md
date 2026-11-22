@@ -67,16 +67,52 @@ missions:
 - The title bar is the HD2Lab standard: logo (back to the catalog) · `KO | EN` · theme · `⋮`.
   Dark (Navy & Lavender) is the default; the iris light theme is one toggle away and remembered.
 
+## Stability guarantees
+
+A pass over the engine and the runtime (WO-01 … WO-06) made three promises explicit, and each one
+is covered by a test:
+
+**One source of truth per lesson.** In a Git lesson the repository's working tree is the authority;
+`session.files` — what the editor and the file list render — is a projection of it, rewritten after
+every command. Switching branches, merging, rebasing, resetting, restoring or removing a file all
+move the editor with them, and deleting the open file hands the editor to a file that still exists.
+
+**Nothing the learner typed disappears without a decision.** `checkout`/`switch` carry staged,
+unstaged and untracked work across when it does not collide with the target branch, and refuse the
+switch (changing nothing) when it would. `merge` refuses to roll over local edits, a conflicted
+merge keeps its markers, and `reset --hard` restores tracked files while leaving untracked files
+alone. Every command that reports failure restores the whole repository — commits, branches,
+index, worktree, counters — from a snapshot taken before it ran.
+
+**A program cannot take the page down with it.** Pyodide runs in a Web Worker, one program at a
+time, each with its own namespace and a directory in the interpreter's virtual filesystem (so
+`main.py` can `import practice`). Every result carries the request id it was asked with, so a run
+from a lesson the learner already left is dropped. Stop terminates the worker, a 20-second timeout
+does the same, and a failed CDN download leaves nothing behind for the next try. A run that raised,
+hit a `SyntaxError` or was stopped never counts as a finished mission.
+
+**A reload comes back where you were.** Files, the open file, completed missions, the current
+mission and — for Git — the repository itself (commits, branches, index, a pending merge) are saved
+per lesson and restored on load. Restarting a lesson clears that record and starts from the
+markdown again.
+
+The Git lesson's "이 실습 엔진이 단순화한 부분" section lists what the teaching engine deliberately
+simplifies (whole-tree snapshots, file-level merge, 8-character hashes, no stash/reflog/remote).
+
 ## Development
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173/PKPilot0013/
-npm test           # Vitest — frontmatter parser, panel slots, lesson checks, real Python runs
+npm test           # Vitest — parser, panels, checks, Git engine, session, Python protocol
 npm run build      # tsc --noEmit && vite build
 npm run preview    # http://localhost:4173/PKPilot0013/
-npm run test:e2e   # Playwright: 1440×900 catalog → lesson → run, 390×844 tabs
+npm run test:e2e   # Playwright: catalog → lesson → run, branch switch, reload, stop, 390/1440
 ```
+
+`PK13_PORT` moves the preview server when 4173 is taken; `PK13_BASE` points the suite at an already
+running server (the live site, for example). `--grep @smoke` runs the subset CI requires: those
+cases need no network, so a release cannot ship with a broken editor/repository contract.
 
 The Pyodide runtime is the only network request the app makes, and only when a Python lesson is
 first run (~10 MB from `cdn.jsdelivr.net`). If it cannot be reached, the output card says so and the
@@ -95,7 +131,9 @@ src/
     git/repo.ts        educational Git engine (commands, three-way merge, rebase, reset)
     git/graph.ts       lane/row layout for the commit graph
     git/diff.ts        unified diff + LCS
-    python/runner.ts   Pyodide loader with staged progress and offline fallback
+    python/runner.ts   Pyodide in a Web Worker: one run at a time, ids, stop, timeout, retry
+    python/pyodide.worker.ts  the interpreter itself (fresh namespace + VFS per run)
+  state/session.ts     projection of the working tree, save/restore policy
   state/useSandbox.ts  lesson ↔ engines ↔ React session, progress persistence
   components/          title bar, landing catalog, lesson doc renderer, sidebar, editor,
                        terminal, mission card, panel slots, git panels
@@ -108,6 +146,11 @@ tools/                 brand asset + OG image generator
 
 `.github/workflows/deploy.yml` runs on every push to `main` (type check → unit tests → build) and
 publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
+
+The `@smoke` E2E step belongs in that workflow, but the assistant's GitHub token has no `workflows`
+permission, so the file cannot be written from a pull request. The ready-to-install version is kept
+at [`docs/ci-workflow.yml`](docs/ci-workflow.yml): copy it over `.github/workflows/deploy.yml` as the
+repository owner. Until then CI still type-checks, unit-tests and builds every push.
 
 ## License
 
