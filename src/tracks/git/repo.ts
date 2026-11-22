@@ -1013,7 +1013,7 @@ export class GitRepo {
 /** Files the Git track starts with — small enough to read, real enough to matter. */
 export const gitSeed = (): Record<string, string> => ({
   'README.md': [
-    '# Vísna Sól · Git 실습 저장소',
+    '# CodePlayground · Git 실습 저장소',
     '',
     '이 저장소는 Git을 손으로 익히는 공간입니다.',
     '아래 단계를 차례대로 따라 해 보세요.',
@@ -1023,7 +1023,7 @@ export const gitSeed = (): Record<string, string> => ({
     '3. 브랜치를 만들고 이동하기',
   ].join('\n'),
   'app.js': [
-    '// Vísna Sól · 작은 카운터 앱',
+    '// CodePlayground · 작은 카운터 앱',
     'let count = 0;',
     '',
     'function increment() {',

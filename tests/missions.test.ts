@@ -60,9 +60,9 @@ describe('Python lesson missions', () => {
 
   it('wants the learner’s own name in both the file and the output', () => {
     const edited = pythonState('python-hello', {
-      files: { ...lesson('python-hello').files, 'main.py': 'name = "Vísna Sól"\nprint(f"안녕하세요, {name}입니다.")' },
+      files: { ...lesson('python-hello').files, 'main.py': 'name = "CodePlayground"\nprint(f"안녕하세요, {name}입니다.")' },
       runs: 1,
-      stdout: '안녕하세요, Vísna Sól입니다.',
+      stdout: '안녕하세요, CodePlayground입니다.',
     });
     expect(passes('python-hello', 'py-name', edited)).toBe(true);
     expect(passes('python-hello', 'py-name', pythonState('python-hello', { runs: 1, stdout: '안녕하세요, 학습자입니다.' }))).toBe(false);

@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
-// Vísna Sól is published under a GitHub Pages project sub-path.
+// CodePlayground is published under a GitHub Pages project sub-path.
 export default defineConfig({
   base: '/PKPilot0013/',
   plugins: [react()],

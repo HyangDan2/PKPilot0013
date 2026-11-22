@@ -28,7 +28,7 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     await expect(page.getByTestId('landing')).toBeVisible();
     await expect(page.getByTestId('lesson-card-python-hello')).toBeVisible();
     await expect(page.getByTestId('lesson-card-git-basics')).toBeVisible();
-    await expect(page.locator('.brand')).toContainText('Vísna Sól');
+    await expect(page.locator('.brand')).toContainText('CodePlayground');
     // the four old track tabs are gone
     await expect(page.locator('.track-tab')).toHaveCount(0);
     expect(await overflow(page)).toBe(0);

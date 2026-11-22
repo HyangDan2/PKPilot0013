@@ -1,4 +1,4 @@
-# Third-Party Notices — PKPilot 0013 (Vísna Sól)
+# Third-Party Notices — PKPilot 0013 (CodePlayground)
 
 이 앱은 아래 소프트웨어와 외부 자산을 사용합니다.
 

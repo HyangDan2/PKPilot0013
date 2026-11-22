@@ -1,6 +1,6 @@
 /**
  * CPython in the browser through Pyodide, fetched from the jsDelivr CDN the
- * first time the Python track needs it. Everything else in Vísna Sól is local;
+ * first time the Python track needs it. Everything else in CodePlayground is local;
  * this is the one download, so it reports progress and fails softly when the
  * learner is offline.
  */
@@ -37,7 +37,7 @@ function setProgress(stage: PythonStage, percent: number) {
 
 function loadScript(url: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>(`script[data-visna-pyodide="1"]`);
+    const existing = document.querySelector<HTMLScriptElement>(`script[data-codeplayground-pyodide="1"]`);
     if (existing) {
       resolve();
       return;
@@ -45,7 +45,7 @@ function loadScript(url: string): Promise<void> {
     const script = document.createElement('script');
     script.src = url;
     script.async = true;
-    script.dataset.visnaPyodide = '1';
+    script.dataset.codeplaygroundPyodide = '1';
     script.onload = () => resolve();
     script.onerror = () => reject(new Error('pyodide-script-failed'));
     document.head.appendChild(script);

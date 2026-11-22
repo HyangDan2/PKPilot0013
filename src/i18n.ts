@@ -2,7 +2,7 @@
 export type Lang = 'ko' | 'en';
 
 const ko = {
-  appName: 'Vísna Sól',
+  appName: 'CodePlayground',
   brandSub: '기초 강의 IDE',
   tagline: '브라우저에서 직접 치면서 배우는 기초 코딩 강의',
 
@@ -119,7 +119,7 @@ const ko = {
 export type Dict = { [K in keyof typeof ko]: string };
 
 const en: Dict = {
-  appName: 'Vísna Sól',
+  appName: 'CodePlayground',
   brandSub: 'Lesson IDE',
   tagline: 'Beginner coding lessons you learn by typing, in the browser',
 
