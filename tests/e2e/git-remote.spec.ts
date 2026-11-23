@@ -79,7 +79,8 @@ test.describe('WO-18 · the Git lesson reaches push', () => {
     await expect(page.getByTestId('remote-chip-origin-main')).toBeVisible();
     await expect(page.getByTestId('remote-drift')).toContainText('원격과 동기화됨');
     await expect(page.getByTestId('mission-banner')).toContainText('6/6');
-    await expect(page.getByTestId('mission-card')).toContainText('원격에 올리기');
+    // The last mission leaves the card in free-practice mode with every mission done.
+    await expect(page.getByTestId('mission-card')).toContainText('모든 미션을 완료했습니다');
 
     // A commit after the push turns the same line into "ahead", and pushing
     // again brings it back — the lesson's last hint, verified.
