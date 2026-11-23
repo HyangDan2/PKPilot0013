@@ -1120,6 +1120,11 @@ img {
   color: var(--accent-deep);
   background: var(--accent-veil);
 }
+/* A remote-tracking branch lives on the remote, so its chip stays outlined. */
+.branch-chips li.remote {
+  border-style: dashed;
+  color: var(--accent-deep);
+}
 .branch-chips em {
   font-style: normal;
   color: var(--muted);
@@ -1129,6 +1134,42 @@ img {
   height: 5px;
   border-radius: 50%;
   background: currentColor;
+}
+
+/* Remote / upstream line in the working-tree card. */
+.remote-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 7px 0 0;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.remote-name {
+  color: var(--muted);
+}
+.remote-drift {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+.remote-drift.sync {
+  border-color: var(--accent-line);
+  color: var(--accent-deep);
+  background: var(--accent-veil);
+}
+.remote-drift.drift {
+  border-color: var(--err, #b4552d);
+  color: inherit;
+}
+.remote-empty {
+  line-height: 1.6;
 }
 
 .status-list {

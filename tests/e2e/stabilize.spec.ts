@@ -126,13 +126,13 @@ test.describe('WO-06 · a reload comes back where the learner was', () => {
     await run(page, 'git commit -m "첫 커밋"');
     await run(page, 'git switch -c feature');
     await page.getByTestId('code-area').fill('# 저장되는 README\n');
-    await expect(page.getByTestId('mission-banner')).toContainText('2/4');
+    await expect(page.getByTestId('mission-banner')).toContainText('2/6');
 
     await page.waitForTimeout(400); // the save is debounced
     await page.reload();
 
     // the hash still points at the lesson, so the reload lands straight in it
-    await expect(page.getByTestId('mission-banner')).toContainText('2/4', { timeout: 20_000 });
+    await expect(page.getByTestId('mission-banner')).toContainText('2/6', { timeout: 20_000 });
     await expect(page.getByTestId('mission-card')).toContainText('브랜치 만들고 이동하기');
     await page.getByTestId('tab-README.md').click();
     await expect(page.getByTestId('code-area')).toHaveValue('# 저장되는 README\n');

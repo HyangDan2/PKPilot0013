@@ -24,6 +24,8 @@ export type CheckSpec =
   | { type: 'git-commits'; min: number }
   | { type: 'git-branch'; name: string }
   | { type: 'git-merge' }
+  | { type: 'git-remote'; name?: string }
+  | { type: 'git-push'; remote?: string; branch?: string }
   | { type: 'all'; checks: CheckSpec[] };
 
 export interface LessonMission {
@@ -66,4 +68,13 @@ export interface LessonState {
   gitBranch: string | null;
   gitBranches: { name: string; sha: string | null; ahead?: number }[];
   gitMainTip: string | null;
+  /** Remotes the learner registered — a virtual `origin` in this page. */
+  gitRemotes: { name: string; url: string }[];
+  /**
+   * Remote-tracking branches, with `contained` telling whether their work is
+   * already part of the local branch of the same name.
+   */
+  gitRemoteBranches: { ref: string; remote: string; branch: string; sha: string | null; contained: boolean }[];
+  /** Fast-forward merges — real merges that create no merge commit. */
+  gitFastForwards: number;
 }

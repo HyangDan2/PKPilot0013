@@ -33,6 +33,26 @@ export interface Commit {
 
 export type Head = { kind: 'branch'; name: string } | { kind: 'detached'; sha: string };
 
+/** A remote the learner registered with `git remote add` — held in the page, not online. */
+export interface Remote {
+  name: string;
+  url: string;
+}
+
+/** `branch.<name>.remote` + `.merge`: where a local branch pushes and pulls. */
+export interface Upstream {
+  remote: string;
+  branch: string;
+}
+
+export interface RepoStats {
+  commits: number;
+  merges: number;
+  rebases: number;
+  /** A merge that only moved the branch forward — no merge commit was made. */
+  fastForwards: number;
+}
+
 export type FileStatus = 'added' | 'modified' | 'deleted';
 
 export interface StatusEntry {
@@ -59,7 +79,16 @@ export interface GitSnapshot {
    * snapshot existed: abort can then reach HEAD but not the exact work tree.
    */
   mergeStateAvailable: boolean;
-  stats: { commits: number; merges: number; rebases: number };
+  /** Registered remotes, in name order. */
+  remotes: Remote[];
+  /**
+   * `refs/remotes/*` — the remote branches this repository has seen, named
+   * `origin/main` exactly as git decorates them.
+   */
+  remoteBranches: { ref: string; remote: string; branch: string; sha: string | null }[];
+  /** The checked-out branch's upstream and how far the two sides have drifted. */
+  upstream: { ref: string; remote: string; branch: string; ahead: number; behind: number } | null;
+  stats: RepoStats;
 }
 
 /** Everything a repository is, as plain JSON — for rollback and for a reload. */
@@ -83,7 +112,12 @@ export interface GitRepoState {
    * unstaged and untracked work survives a merge they decide to back out of.
    */
   mergeState: GitRepoState | null;
-  stats: { commits: number; merges: number; rebases: number };
+  /** Remotes the learner added, and the remote branches we have seen on them. */
+  remotes: Remote[];
+  remoteRefs: Record<string, string | null>;
+  /** Which remote branch each local branch pushes to and pulls from. */
+  upstreams: Record<string, Upstream>;
+  stats: RepoStats;
   clock: number;
   serial: number;
   previousBranch: string | null;
@@ -105,6 +139,43 @@ export function conflictPaths(workdir: Record<string, string>): string[] {
   return Object.keys(workdir)
     .filter((path) => typeof workdir[path] === 'string' && hasConflictMarkers(workdir[path]))
     .sort();
+}
+
+/** "1 commit" / "2 commits" — the wording git's status lines use. */
+const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`;
+
+// ── reading saved state defensively ──────────────────────────────────────────
+// A save may come from a build that predates remotes, so every new field is
+// read for what it is instead of trusted.
+
+function readRemotes(value: unknown): Remote[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((item) => ({ name: String(item.name ?? ''), url: String(item.url ?? '') }))
+    .filter((item) => item.name !== '')
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function readStringRefs(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const refs: Record<string, string | null> = {};
+  for (const [ref, sha] of Object.entries(value as Record<string, unknown>)) {
+    refs[ref] = typeof sha === 'string' ? sha : null;
+  }
+  return refs;
+}
+
+function readUpstreams(value: unknown): Record<string, Upstream> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const upstreams: Record<string, Upstream> = {};
+  for (const [branch, item] of Object.entries(value as Record<string, unknown>)) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.remote !== 'string' || typeof record.branch !== 'string') continue;
+    upstreams[branch] = { remote: record.remote, branch: record.branch };
+  }
+  return upstreams;
 }
 
 const tokenize = (input: string): string[] => {
@@ -158,7 +229,13 @@ export class GitRepo {
   unmergedPaths: string[] = [];
   /** Pre-merge state, kept only while a conflicted merge is unresolved. */
   mergeState: GitRepoState | null = null;
-  stats = { commits: 0, merges: 0, rebases: 0 };
+  /** `origin` and anything else the learner added — a virtual remote in this page. */
+  remotes: Remote[] = [];
+  /** What `origin/<branch>` pointed at the last time we pushed or fetched. */
+  remoteRefs: Record<string, string | null> = {};
+  /** Upstream of each local branch, set by `git push -u`. */
+  upstreams: Record<string, Upstream> = {};
+  stats: RepoStats = { commits: 0, merges: 0, rebases: 0, fastForwards: 0 };
 
   private clock = Date.now() - 1000 * 60 * 60 * 24 * 3;
   private serial = 0;
@@ -187,6 +264,9 @@ export class GitRepo {
       mergePending: this.mergePending,
       unmergedPaths: [...this.unmergedPaths],
       mergeState: this.mergeState ? (JSON.parse(JSON.stringify(this.mergeState)) as GitRepoState) : null,
+      remotes: this.remotes.map((remote) => ({ ...remote })),
+      remoteRefs: { ...this.remoteRefs },
+      upstreams: Object.fromEntries(Object.entries(this.upstreams).map(([name, upstream]) => [name, { ...upstream }])),
       stats: { ...this.stats },
       clock: this.clock,
       serial: this.serial,
@@ -207,7 +287,15 @@ export class GitRepo {
       ? copy.unmergedPaths.filter((path): path is string => typeof path === 'string')
       : [];
     this.mergeState = copy.mergeState ? (JSON.parse(JSON.stringify(copy.mergeState)) as GitRepoState) : null;
-    this.stats = copy.stats;
+    this.remotes = readRemotes(copy.remotes);
+    this.remoteRefs = readStringRefs(copy.remoteRefs);
+    this.upstreams = readUpstreams(copy.upstreams);
+    this.stats = {
+      commits: Number(copy.stats?.commits ?? 0),
+      merges: Number(copy.stats?.merges ?? 0),
+      rebases: Number(copy.stats?.rebases ?? 0),
+      fastForwards: Number(copy.stats?.fastForwards ?? 0),
+    };
     this.clock = copy.clock;
     this.serial = copy.serial;
     this.previousBranch = copy.previousBranch;
@@ -258,10 +346,16 @@ export class GitRepo {
         state.mergeState && typeof state.mergeState === 'object'
           ? (JSON.parse(JSON.stringify(state.mergeState)) as GitRepoState)
           : null,
+      // A save written before remotes existed simply has none: the learner can
+      // add one again without their commits or branches being touched.
+      remotes: readRemotes(state.remotes),
+      remoteRefs: readStringRefs(state.remoteRefs),
+      upstreams: readUpstreams(state.upstreams),
       stats: {
         commits: Number(state.stats?.commits ?? 0),
         merges: Number(state.stats?.merges ?? 0),
         rebases: Number(state.stats?.rebases ?? 0),
+        fastForwards: Number(state.stats?.fastForwards ?? 0),
       },
       clock: Number(state.clock ?? Date.now()),
       serial: Number(state.serial ?? 0),
@@ -304,9 +398,47 @@ export class GitRepo {
       return sha;
     }
     if (ref in this.branches) return this.branches[ref];
+    // `origin/main` — a remote-tracking branch is a ref the learner can merge,
+    // branch from and read, exactly like a local one.
+    if (ref in this.remoteRefs) return this.remoteRefs[ref];
     if (this.commits[ref]) return ref;
     const match = Object.keys(this.commits).find((sha) => sha.startsWith(ref));
     return match ?? null;
+  }
+
+  // ── remotes ────────────────────────────────────────────────────────────────
+  private remoteByName(name: string): Remote | null {
+    return this.remotes.find((remote) => remote.name === name) ?? null;
+  }
+
+  private static remoteRef(remote: string, branch: string): string {
+    return `${remote}/${branch}`;
+  }
+
+  private upstreamOf(branch: string | null): Upstream | null {
+    if (!branch) return null;
+    return this.upstreams[branch] ?? null;
+  }
+
+  /** How many commits `a` has that `b` does not, and the other way round. */
+  private divergence(a: string | null, b: string | null): { ahead: number; behind: number } {
+    const left = this.ancestors(a);
+    const right = this.ancestors(b);
+    let ahead = 0;
+    let behind = 0;
+    for (const sha of left) if (!right.has(sha)) ahead += 1;
+    for (const sha of right) if (!left.has(sha)) behind += 1;
+    return { ahead, behind };
+  }
+
+  /** The checked-out branch's upstream, with its drift — what `git status` reads. */
+  private upstreamInfo(): GitSnapshot['upstream'] {
+    const branch = this.branch;
+    const upstream = this.upstreamOf(branch);
+    if (!branch || !upstream) return null;
+    const ref = GitRepo.remoteRef(upstream.remote, upstream.branch);
+    const { ahead, behind } = this.divergence(this.headSha(), this.remoteRefs[ref] ?? null);
+    return { ref, remote: upstream.remote, branch: upstream.branch, ahead, behind };
   }
 
   private nextTime(): number {
@@ -387,6 +519,12 @@ export class GitRepo {
       if (!sha) continue;
       refs[sha] = [...(refs[sha] ?? []), name];
     }
+    // `origin/main` travels in the same decorations list, so the graph shows
+    // where the remote stands next to the local branches.
+    for (const [ref, sha] of Object.entries(this.remoteRefs)) {
+      if (!sha) continue;
+      refs[sha] = [...(refs[sha] ?? []), ref];
+    }
     const currentName = this.branch;
     return {
       initialized: this.initialized,
@@ -415,6 +553,15 @@ export class GitRepo {
       mergePending: this.mergePending,
       unmerged: this.mergePending ? [...this.unmergedPaths].sort() : [],
       mergeStateAvailable: !this.mergePending || this.mergeState !== null,
+      remotes: this.remotes.map((remote) => ({ ...remote })),
+      remoteBranches: Object.entries(this.remoteRefs)
+        .filter(([ref]) => ref.includes('/'))
+        .map(([ref, sha]) => {
+          const slash = ref.indexOf('/');
+          return { ref, remote: ref.slice(0, slash), branch: ref.slice(slash + 1), sha };
+        })
+        .sort((a, b) => a.ref.localeCompare(b.ref)),
+      upstream: this.upstreamInfo(),
       stats: { ...this.stats },
     };
   }
@@ -536,6 +683,10 @@ export class GitRepo {
         out('   switch    브랜치를 전환합니다', 'dim'),
         out('   merge     다른 브랜치를 합칩니다', 'dim'),
         out('   rebase    커밋을 다른 기반 위로 옮깁니다', 'dim'),
+        out('   remote    원격 저장소를 관리합니다', 'dim'),
+        out('   push      커밋을 원격 저장소에 올립니다', 'dim'),
+        out('   fetch     원격 저장소의 변경을 받아 옵니다', 'dim'),
+        out('   pull      원격 변경을 받아 지금 브랜치에 합칩니다', 'dim'),
         out('   reset     HEAD를 되돌립니다', 'dim'),
         out('   log       커밋 기록을 봅니다', 'dim'),
         out('   diff      변경 내용을 봅니다', 'dim'),
@@ -548,7 +699,7 @@ export class GitRepo {
     // learner can read the error and try the same thing again. The single
     // exception is a conflicted merge: its half-finished state *is* the result
     // they are meant to resolve.
-    const keepOnFailure = sub === 'merge' && !args.includes('--abort');
+    const keepOnFailure = (sub === 'merge' && !args.includes('--abort')) || sub === 'pull';
     const before = keepOnFailure ? null : this.capture();
     const res = this.dispatch(sub, rest);
     if (before && res.exit !== 0) this.restore(before);
@@ -573,6 +724,14 @@ export class GitRepo {
         return this.cmdCheckout(rest, 'checkout');
       case 'merge':
         return this.cmdMerge(rest);
+      case 'remote':
+        return this.cmdRemote(rest);
+      case 'push':
+        return this.cmdPush(rest);
+      case 'fetch':
+        return this.cmdFetch(rest);
+      case 'pull':
+        return this.cmdPull(rest);
       case 'rebase':
         return this.cmdRebase(rest);
       case 'reset':
@@ -603,7 +762,7 @@ export class GitRepo {
     this.initialized = true;
     this.branches = { [DEFAULT_BRANCH]: null };
     this.head = { kind: 'branch', name: DEFAULT_BRANCH };
-    this.stats = { commits: 0, merges: 0, rebases: 0 };
+    this.stats = { commits: 0, merges: 0, rebases: 0, fastForwards: 0 };
     return result([
       out(`Initialized empty Git repository in /home/learner/work/.git/`, 'ok'),
       out(`기본 브랜치: ${DEFAULT_BRANCH}`, 'dim'),
@@ -616,6 +775,29 @@ export class GitRepo {
       lines.push(out(`HEAD detached at ${this.head.sha.slice(0, 7)}`, 'warn'));
     } else {
       lines.push(mix('On branch ', { text: this.head.name, tone: 'branch' }));
+    }
+    // Where this branch stands against its remote — the first thing a learner
+    // needs after a push, a pull or someone else moving the remote.
+    const upstream = this.upstreamInfo();
+    if (upstream) {
+      const { ref, ahead, behind } = upstream;
+      if (!this.hasCommit(this.remoteRefs[ref] ?? null)) {
+        lines.push(out(`Your branch is based on '${ref}', but the upstream is gone.`, 'warn'));
+      } else if (ahead === 0 && behind === 0) {
+        lines.push(out(`Your branch is up to date with '${ref}'.`, 'plain'));
+      } else if (behind === 0) {
+        lines.push(out(`Your branch is ahead of '${ref}' by ${plural(ahead, 'commit', 'commits')}.`, 'plain'));
+        lines.push(out('  (use "git push" to publish your local commits)', 'dim'));
+      } else if (ahead === 0) {
+        lines.push(
+          out(`Your branch is behind '${ref}' by ${plural(behind, 'commit', 'commits')}, and can be fast-forwarded.`, 'plain'),
+        );
+        lines.push(out('  (use "git pull" to update your local branch)', 'dim'));
+      } else {
+        lines.push(out(`Your branch and '${ref}' have diverged,`, 'warn'));
+        lines.push(out(`and have ${ahead} and ${behind} different commits each, respectively.`, 'warn'));
+        lines.push(out('  (use "git pull" if you want to integrate the remote branch with yours)', 'dim'));
+      }
     }
     if (this.mergePending) {
       if (this.unmergedPaths.length) {
@@ -824,7 +1006,13 @@ export class GitRepo {
   /** The commit a merge in progress is bringing in. */
   private mergeTip(): string | null {
     if (!this.mergePending) return null;
-    return this.branches[this.mergePending] ?? this.mergeState?.branches[this.mergePending] ?? null;
+    // A pull's pending merge names a remote-tracking branch (`origin/main`).
+    return (
+      this.branches[this.mergePending] ??
+      this.remoteRefs[this.mergePending] ??
+      this.mergeState?.branches[this.mergePending] ??
+      null
+    );
   }
 
   private blockedCommit(): CommandResult {
@@ -866,11 +1054,20 @@ export class GitRepo {
         const current = name === this.branch;
         if (verbose) {
           const commit = this.hasCommit(sha) ? this.commits[sha] : null;
+          const upstream = this.upstreams[name];
+          const tracking = upstream
+            ? (() => {
+                const ref = GitRepo.remoteRef(upstream.remote, upstream.branch);
+                const { ahead, behind } = this.divergence(sha, this.remoteRefs[ref] ?? null);
+                const drift = ahead === 0 && behind === 0 ? '' : `: ahead ${ahead}, behind ${behind}`;
+                return ` [${ref}${drift}]`;
+              })()
+            : '';
           lines.push(
             mix(current ? '* ' : '  ', { text: name.padEnd(16), tone: current ? 'branch' : 'plain' }, {
               text: sha ? sha.slice(0, 7) : '(커밋 없음)',
               tone: 'sha',
-            }, ` ${commit ? commit.message : ''}`),
+            }, `${tracking} ${commit ? commit.message : ''}`),
           );
         } else {
           lines.push(out(`${current ? '* ' : '  '}${name}`, current ? 'branch' : 'plain'));
@@ -1094,21 +1291,48 @@ export class GitRepo {
     if (this.mergePending) {
       return fail([
         out('error: You have not concluded your merge (MERGE_HEAD exists).', 'err'),
-        out('hint: 충돌을 정리하고 "git add ." · "git commit -m \\"merge\\"" 로 마무리하거나, "git merge --abort" 로 되돌리세요.', 'dim'),
+        out('hint: 충돌을 정리하고 git add . 와 git commit -m "merge" 로 마무리하거나, git merge --abort 로 되돌리세요.', 'dim'),
       ]);
     }
     const name = args.find((arg) => !arg.startsWith('-'));
     if (!name) return fail([out('fatal: No commit specified and merge.defaultToUpstream not set.', 'err')]);
-    if (!(name in this.branches)) {
-      return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
+    // A local branch name, or a remote-tracking branch such as `origin/main`.
+    const known = name in this.branches || name in this.remoteRefs;
+    if (!known) {
+      return fail([
+        out(`merge: ${name} - not something we can merge`, 'err'),
+        out('hint: 지금 브랜치는 git branch 로, 원격 브랜치는 git remote -v 와 git status 로 확인해 보세요.', 'dim'),
+      ]);
     }
-    if (this.branch === name) return result([out('Already up to date.', 'plain')]);
+    if (this.branch === name) {
+      return result([
+        out('Already up to date.', 'plain'),
+        out(`hint: '${name}' 브랜치에 있는 동안에는 자기 자신을 병합할 수 없습니다. git switch main 으로 옮긴 뒤 git merge ${name} 을 실행하세요.`, 'dim'),
+      ]);
+    }
     this.unmergedPaths = [];
-    const ourSha = this.headSha();
-    const theirSha = this.branches[name];
+    const theirSha = name in this.branches ? this.branches[name] : this.remoteRefs[name];
     if (!this.hasCommit(theirSha)) return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
+    return this.mergeIntoHead(theirSha, name);
+  }
+
+  /**
+   * The merge itself — fast-forward, three-way merge, or a conflict the learner
+   * resolves. Shared by `git merge` (local and remote-tracking branches) and by
+   * `git pull`, so both behave the same way in every edge case.
+   */
+  private mergeIntoHead(theirSha: string, label: string): CommandResult {
+    const ourSha = this.headSha();
     if (!this.hasCommit(ourSha)) {
-      return this.switchToBranch(name, false);
+      // Nothing of our own yet: the checked-out branch becomes the other side.
+      const plan = this.localChangePlan(this.commits[theirSha].tree);
+      if (plan.blocked.length) return this.blockedMerge(plan.blocked);
+      this.applyTree(this.commits[theirSha].tree);
+      this.unmergedPaths = [];
+      if (this.branch) this.branches[this.branch] = theirSha;
+      else this.head = { kind: 'detached', sha: theirSha };
+      this.stats.fastForwards += 1;
+      return result([out(`Updating ..${theirSha.slice(0, 7)}`, 'plain'), out('Fast-forward', 'ok')]);
     }
     const base = this.mergeBase(ourSha, theirSha);
     if (base === theirSha) return result([out('Already up to date.', 'plain')]);
@@ -1119,8 +1343,11 @@ export class GitRepo {
       if (plan.blocked.length) return this.blockedMerge(plan.blocked);
       this.applyTree(theirs.tree);
       this.unmergedPaths = [];
-      if (this.branch) this.branches[this.branch] = theirSha as string;
-      else this.head = { kind: 'detached', sha: theirSha as string };
+      if (this.branch) this.branches[this.branch] = theirSha;
+      else this.head = { kind: 'detached', sha: theirSha };
+      // A fast-forward is still a merge: no merge commit is created, but the
+      // other side's work is now part of this branch — the mission counts it.
+      this.stats.fastForwards += 1;
       return result([
         out(`Updating ${ourSha.slice(0, 7)}..${(theirSha as string).slice(0, 7)}`, 'plain'),
         out('Fast-forward', 'ok'),
@@ -1130,7 +1357,7 @@ export class GitRepo {
     }
 
     const baseTree = this.commits[base as string].tree;
-    const { tree, conflicts } = this.mergeTree(baseTree, this.commits[ourSha].tree, this.commits[theirSha].tree, name);
+    const { tree, conflicts } = this.mergeTree(baseTree, this.commits[ourSha].tree, this.commits[theirSha].tree, label);
     // A merge must never quietly roll over work the learner has not committed.
     const plan = this.localChangePlan(tree);
     if (plan.blocked.length) return this.blockedMerge(plan.blocked);
@@ -1148,7 +1375,7 @@ export class GitRepo {
         lines.push(out(`CONFLICT (content): Merge conflict in ${path}`, 'err'));
       }
       lines.push(out('Automatic merge failed; fix conflicts and then commit the result.', 'err'));
-      lines.push(out(`hint: 충돌 표시(<<<<<<<, =======, >>>>>>>)를 지우고 파일을 정리한 뒤 "git add ."와 "git commit -m \\"merge\\""를 실행해 주세요.`, 'dim'));
+      lines.push(out('hint: 충돌 표시(<<<<<<<, =======, >>>>>>>)를 지우고 파일을 정리한 뒤 git add . 와 git commit -m "merge" 를 실행해 주세요.', 'dim'));
       // The one failure whose half-finished state must stay: the learner resolves
       // the markers and commits the result themselves.
       const workdir: Record<string, string> = { ...tree };
@@ -1158,7 +1385,7 @@ export class GitRepo {
         else workdir[path] = value;
       }
       this.workdir = workdir;
-      this.mergePending = name;
+      this.mergePending = label;
       this.unmergedPaths = [...conflicts].sort();
       this.mergeState = snapshot;
       return fail(lines);
@@ -1166,12 +1393,311 @@ export class GitRepo {
     this.applyTree(tree);
     this.mergeState = null;
     this.unmergedPaths = [];
-    const commit = this.createCommit(`Merge branch '${name}'`, tree, [ourSha, theirSha as string]);
+    const commit = this.createCommit(`Merge branch '${label}'`, tree, [ourSha, theirSha]);
     if (this.branch) this.branches[this.branch] = commit.sha;
     const diffs = diffTrees(this.commits[ourSha].tree, tree);
     lines.push(out(`Merge made by the 'ort' strategy.`, 'ok'));
     lines.push(out(statLine(diffStat(diffs)), 'plain'));
     return result(lines);
+  }
+
+  // ── remotes · push · fetch · pull ──────────────────────────────────────────
+  private cmdRemote(args: string[]): CommandResult {
+    const [action, ...rest] = args;
+    if (!action) return result(this.remotes.map((remote) => out(remote.name, 'plain')));
+    if (action === '-v' || action === '--verbose') {
+      const lines: OutLine[] = [];
+      for (const remote of this.remotes) {
+        lines.push(out(`${remote.name}\t${remote.url} (fetch)`, 'plain'));
+        lines.push(out(`${remote.name}\t${remote.url} (push)`, 'plain'));
+      }
+      return result(lines);
+    }
+    if (action === 'add') {
+      const [name, url] = rest.filter((arg) => !arg.startsWith('-'));
+      if (!name || !url) {
+        return fail([
+          out('error: usage: git remote add <name> <url>', 'err'),
+          out('hint: 예) git remote add origin https://github.com/<계정>/<저장소>.git', 'dim'),
+        ]);
+      }
+      if (name.includes('/')) return fail([out(`error: '${name}' is not a valid remote name`, 'err')]);
+      if (this.remotes.some((remote) => remote.name === name)) {
+        return fail([out(`error: remote ${name} already exists.`, 'err')]);
+      }
+      this.remotes.push({ name, url });
+      this.remotes.sort((a, b) => a.name.localeCompare(b.name));
+      return result([]);
+    }
+    if (action === 'remove' || action === 'rm') {
+      const name = rest.find((arg) => !arg.startsWith('-'));
+      if (!name) return fail([out('error: No such remote', 'err')]);
+      if (!this.remotes.some((remote) => remote.name === name)) {
+        return fail([out(`error: No such remote: '${name}'`, 'err')]);
+      }
+      this.remotes = this.remotes.filter((remote) => remote.name !== name);
+      for (const ref of Object.keys(this.remoteRefs)) {
+        if (ref.startsWith(`${name}/`)) delete this.remoteRefs[ref];
+      }
+      for (const [branch, upstream] of Object.entries(this.upstreams)) {
+        if (upstream.remote === name) delete this.upstreams[branch];
+      }
+      return result([]);
+    }
+    if (action === 'set-url') {
+      const [name, url] = rest.filter((arg) => !arg.startsWith('-'));
+      const remote = name ? this.remoteByName(name) : null;
+      if (!remote) return fail([out(`error: No such remote: '${name ?? ''}'`, 'err')]);
+      if (!url) return fail([out('error: usage: git remote set-url <name> <url>', 'err')]);
+      remote.url = url;
+      return result([]);
+    }
+    return fail([
+      out(`error: Unknown subcommand: \`${action}'`, 'err'),
+      out('usage: git remote [-v | --verbose]', 'dim'),
+      out('   or: git remote add <name> <url>', 'dim'),
+      out('   or: git remote remove <name>', 'dim'),
+    ]);
+  }
+
+  private cmdPush(args: string[]): CommandResult {
+    let setUpstream = false;
+    let force = false;
+    let all = false;
+    let remove = false;
+    const positional: string[] = [];
+    for (const arg of args) {
+      if (arg === '-u' || arg === '--set-upstream') setUpstream = true;
+      else if (arg === '-f' || arg === '--force' || arg === '--force-with-lease') force = true;
+      else if (arg === '--all') all = true;
+      else if (arg === '-d' || arg === '--delete') remove = true;
+      else if (arg.startsWith('-') && arg.length > 1) {
+        return fail([
+          out(`error: unknown option \`${arg}'`, 'err'),
+          out('usage: git push [-u | --set-upstream] [-f | --force] [<remote> [<branch>]]', 'dim'),
+        ]);
+      } else positional.push(arg);
+    }
+    const current = this.branch;
+    let remoteName = positional[0];
+    let refspec = positional[1];
+    const upstream = this.upstreamOf(current);
+    if (!remoteName && upstream) {
+      remoteName = upstream.remote;
+      if (!refspec) refspec = upstream.branch;
+    }
+    if (!remoteName) {
+      const suggestion = this.remotes.find((remote) => remote.name === 'origin')?.name ?? this.remotes[0]?.name;
+      if (!suggestion) {
+        return fail([
+          out('fatal: No configured push destination.', 'err'),
+          out('hint: 먼저 git remote add origin <url> 로 원격 저장소를 추가하세요.', 'dim'),
+        ]);
+      }
+      if (!current) {
+        return fail([
+          out('fatal: You are not currently on a branch.', 'err'),
+          out(`hint: git push ${suggestion} HEAD:<브랜치> 형태로 올릴 수 있습니다.`, 'dim'),
+        ]);
+      }
+      return fail([
+        out(`fatal: The current branch ${current} has no upstream branch.`, 'err'),
+        out('To push the current branch and set the remote as upstream, use', 'plain'),
+        blank(),
+        out(`    git push --set-upstream ${suggestion} ${current}`, 'accent'),
+      ]);
+    }
+    const remote = this.remoteByName(remoteName);
+    if (!remote) {
+      return fail([
+        out(`fatal: '${remoteName}' does not appear to be a git repository`, 'err'),
+        out('fatal: Could not read from remote repository.', 'err'),
+        out('hint: git remote -v 로 등록된 원격 저장소를 확인하세요.', 'dim'),
+      ]);
+    }
+    // `git push origin :feature` is the other way of saying `--delete feature`.
+    if (refspec && refspec.startsWith(':')) {
+      remove = true;
+      refspec = refspec.slice(1);
+    }
+    if (remove) {
+      const branchName = (refspec ?? '').replace(/^.*:/, '');
+      if (!branchName) {
+        return fail([out("fatal: --delete doesn't make sense without specifying [<src>:]<dst>.", 'err')]);
+      }
+      const key = GitRepo.remoteRef(remote.name, branchName);
+      if (!(key in this.remoteRefs)) {
+        return fail([
+          out(`error: unable to delete '${branchName}': remote ref does not exist`, 'err'),
+          out(`error: failed to push some refs to '${remote.url}'`, 'err'),
+        ]);
+      }
+      delete this.remoteRefs[key];
+      return result([out(`To ${remote.url}`, 'plain'), out(` - [deleted]         ${branchName}`, 'ok')]);
+    }
+    if (all) {
+      const lines: OutLine[] = [];
+      let exit = 0;
+      for (const name of Object.keys(this.branches).sort()) {
+        if (!this.hasCommit(this.branches[name])) continue;
+        const one = this.cmdPush([remote.name, name]);
+        if (one.exit !== 0) exit = 1;
+        lines.push(...one.lines);
+      }
+      if (!lines.length) lines.push(out('Everything up-to-date', 'plain'));
+      return { lines, exit };
+    }
+    const source = refspec ?? current;
+    if (!source) {
+      return fail([
+        out('fatal: You are not currently on a branch.', 'err'),
+        out('hint: 지금 HEAD는 브랜치를 가리키지 않습니다. git switch main 으로 돌아간 뒤 다시 시도하세요.', 'dim'),
+      ]);
+    }
+    // `git push origin main`, `git push origin main:trunk`, `git push origin HEAD`.
+    const [localName, targetName] = source.includes(':') ? source.split(':') : [source, ''];
+    const remoteBranch = targetName || localName;
+    const localSha = localName === 'HEAD' ? this.headSha() : this.resolve(localName);
+    if (!localName || !this.hasCommit(localSha)) {
+      return fail([
+        out(`error: src refspec ${localName} does not match any`, 'err'),
+        out(`error: failed to push some refs to '${remote.url}'`, 'err'),
+        out('hint: 올리려는 브랜치에 커밋이 있는지 git log --oneline 으로 확인하세요.', 'dim'),
+      ]);
+    }
+    const key = GitRepo.remoteRef(remote.name, remoteBranch);
+    const known = this.remoteRefs[key] ?? null;
+    const trackName = localName in this.branches ? localName : current;
+    const upstreamLine =
+      setUpstream && trackName
+        ? out(`branch '${trackName}' set up to track '${remote.name}/${remoteBranch}'.`, 'plain')
+        : null;
+    if (known === localSha) {
+      if (setUpstream && trackName) this.upstreams[trackName] = { remote: remote.name, branch: remoteBranch };
+      return result([...(upstreamLine ? [upstreamLine] : []), out('Everything up-to-date', 'plain')]);
+    }
+    if (this.hasCommit(known) && !this.isAncestor(known, localSha) && !force) {
+      const behindOnly = this.isAncestor(localSha, known);
+      const hints = behindOnly
+        ? [
+            'hint: Updates were rejected because the tip of your current branch is behind',
+            'hint: its remote counterpart. Integrate the remote changes (e.g.',
+            "hint: 'git pull ...') before pushing again.",
+          ]
+        : [
+            'hint: Updates were rejected because the remote contains work that you do',
+            'hint: not have locally. This is usually caused by another repository pushing',
+            'hint: to the same ref. You may want to first integrate the remote changes',
+            'hint: before pushing again.',
+          ];
+      return fail([
+        out(` ! [rejected]        ${localName} -> ${remoteBranch} (non-fast-forward)`, 'err'),
+        out(`error: failed to push some refs to '${remote.url}'`, 'err'),
+        ...hints.map((text) => out(text, 'dim')),
+        out("hint: See the 'Note about fast-forwards' in 'git push --help' for details.", 'dim'),
+        out(`hint: 이 실습에서는 git pull ${remote.name} ${remoteBranch} 로 합친 뒤 다시 push 하거나, git push --force 로 덮어쓸 수 있습니다.`, 'dim'),
+      ]);
+    }
+    this.remoteRefs[key] = localSha;
+    if (setUpstream && trackName) this.upstreams[trackName] = { remote: remote.name, branch: remoteBranch };
+    const lines: OutLine[] = [];
+    if (upstreamLine) lines.push(upstreamLine);
+    lines.push(out(`To ${remote.url}`, 'plain'));
+    if (!this.hasCommit(known)) {
+      lines.push(out(` * [new branch]      ${localName} -> ${remoteBranch}`, 'ok'));
+    } else if (!this.isAncestor(known, localSha)) {
+      lines.push(out(` + ${known.slice(0, 7)}...${localSha.slice(0, 7)}  ${localName} -> ${remoteBranch} (forced update)`, 'warn'));
+    } else {
+      lines.push(out(`   ${known.slice(0, 7)}..${localSha.slice(0, 7)}  ${localName} -> ${remoteBranch}`, 'ok'));
+    }
+    return result(lines);
+  }
+
+  private cmdFetch(args: string[]): CommandResult {
+    const positional = args.filter((arg) => !arg.startsWith('-'));
+    const [name, branch] = positional;
+    if (this.remotes.length === 0) {
+      return fail([
+        out('fatal: No remote repository specified. Please, specify either a URL or a', 'err'),
+        out('remote name from which new revisions should be fetched.', 'err'),
+        out('hint: git remote add origin <url> 로 원격 저장소를 먼저 추가하세요.', 'dim'),
+      ]);
+    }
+    const remote = name ? this.remoteByName(name) : (this.remoteByName('origin') ?? this.remotes[0]);
+    if (!remote) {
+      return fail([
+        out(`fatal: '${name}' does not appear to be a git repository`, 'err'),
+        out('fatal: Could not read from remote repository.', 'err'),
+        out('hint: git remote -v 로 등록된 원격 저장소를 확인하세요.', 'dim'),
+      ]);
+    }
+    const refs = Object.keys(this.remoteRefs)
+      .filter((ref) => ref.startsWith(`${remote.name}/`))
+      .sort();
+    if (branch) {
+      const wanted = GitRepo.remoteRef(remote.name, branch);
+      if (!refs.includes(wanted)) {
+        return fail([
+          out(`fatal: couldn't find remote ref ${branch}`, 'err'),
+          out(`hint: git push -u ${remote.name} ${branch} 로 먼저 올렸는지 확인하세요.`, 'dim'),
+        ]);
+      }
+      return result([out(`From ${remote.url}`, 'dim'), out(` * branch            ${wanted} -> FETCH_HEAD`, 'dim')]);
+    }
+    const lines: OutLine[] = [];
+    if (refs.length) {
+      lines.push(out(`From ${remote.url}`, 'dim'));
+      for (const ref of refs) {
+        lines.push(out(` * [fetched]         ${ref}`, 'dim'));
+      }
+      lines.push(out(`hint: 원격 추적 브랜치 ${refs.length}개를 확인했습니다. 코드는 git status 로 앞섬·뒤짐을 보세요.`, 'dim'));
+    } else {
+      lines.push(out(`${remote.name} 에 아직 올라온 브랜치가 없습니다. git push -u ${remote.name} ${this.branch ?? 'main'} 로 올려 보세요.`, 'dim'));
+    }
+    return result(lines);
+  }
+
+  private cmdPull(args: string[]): CommandResult {
+    const positional = args.filter((arg) => !arg.startsWith('-'));
+    const current = this.branch;
+    let [remoteName, branchName] = positional;
+    const upstream = this.upstreamOf(current);
+    if (!remoteName) {
+      if (!upstream) {
+        const suggestion = this.remotes.find((remote) => remote.name === 'origin')?.name ?? this.remotes[0]?.name ?? 'origin';
+        return fail([
+          out('There is no tracking information for the current branch.', 'err'),
+          out('Please specify which branch you want to merge with.', 'dim'),
+          out(`    git pull <remote> <branch>`, 'accent'),
+          out(`    git push -u ${suggestion} ${current ?? '<branch>'} 로 업스트림을 먼저 연결할 수 있습니다.`, 'dim'),
+        ]);
+      }
+      remoteName = upstream.remote;
+      branchName = upstream.branch;
+    }
+    const remote = this.remoteByName(remoteName);
+    if (!remote) {
+      return fail([
+        out(`fatal: '${remoteName}' does not appear to be a git repository`, 'err'),
+        out('fatal: Could not read from remote repository.', 'err'),
+        out('hint: git remote -v 로 등록된 원격 저장소를 확인하세요.', 'dim'),
+      ]);
+    }
+    if (!current) {
+      return fail([out('fatal: You are not currently on a branch.', 'err'), out('hint: git switch main 으로 브랜치로 돌아온 뒤 다시 시도하세요.', 'dim')]);
+    }
+    const target = branchName || current;
+    const key = GitRepo.remoteRef(remote.name, target);
+    const theirSha = this.remoteRefs[key] ?? null;
+    if (!this.hasCommit(theirSha)) {
+      return fail([
+        out(`fatal: couldn't find remote ref ${target}`, 'err'),
+        out(`hint: git push -u ${remote.name} ${target} 로 브랜치를 먼저 올렸는지 확인하세요.`, 'dim'),
+      ]);
+    }
+    const from: OutLine[] = [out(`From ${remote.url}`, 'dim'), out(` * branch            ${target} -> FETCH_HEAD`, 'dim')];
+    const merged = this.mergeIntoHead(theirSha, key);
+    return { lines: [...from, ...merged.lines], exit: merged.exit };
   }
 
   private blockedMerge(blocked: string[]): CommandResult {
@@ -1307,7 +1833,9 @@ export class GitRepo {
   }
 
   private reachableCommits(all: boolean): Commit[] {
-    if (!all) return this.commitsSince(this.headSha(), null);
+    // Newest first, as `git log` prints them: after a merge the reader has to
+    // see the merge commit at the top, not buried under the commits it joined.
+    if (!all) return this.commitsSince(this.headSha(), null).reverse();
     const seen = new Set<string>();
     for (const sha of Object.values(this.branches)) for (const id of this.ancestors(sha)) seen.add(id);
     for (const id of this.ancestors(this.headSha())) seen.add(id);
@@ -1357,12 +1885,17 @@ export class GitRepo {
     const parts = Object.entries(this.branches)
       .filter(([, tip]) => tip === sha)
       .map(([name]) => name);
+    // Remote-tracking branches decorate their commit too, as in real git.
+    const remoteParts = Object.entries(this.remoteRefs)
+      .filter(([, tip]) => tip === sha)
+      .map(([ref]) => ref)
+      .sort();
     const head = this.head;
     if (this.headSha() === sha && head.kind === 'branch') {
-      return [`HEAD -> ${head.name}`, ...parts.filter((name) => name !== head.name)].join(', ');
+      return [`HEAD -> ${head.name}`, ...parts.filter((name) => name !== head.name), ...remoteParts].join(', ');
     }
-    if (this.headSha() === sha) return ['HEAD', ...parts].join(', ');
-    return parts.join(', ');
+    if (this.headSha() === sha) return ['HEAD', ...parts, ...remoteParts].join(', ');
+    return [...parts, ...remoteParts].join(', ');
   }
 
   private cmdDiff(args: string[]): CommandResult {

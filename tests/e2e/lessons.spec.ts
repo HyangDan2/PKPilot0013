@@ -69,7 +69,7 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     await run(page, 'git commit -m "첫 커밋"');
     await expect(page.locator('[data-panel="git-graph"]')).toContainText('첫 커밋');
     await expect(page.getByTestId('mission-card')).toContainText('브랜치 만들고 이동하기');
-    await expect(page.getByTestId('mission-card')).toContainText('2/4');
+    await expect(page.getByTestId('mission-card')).toContainText('2/6');
     expect(await overflow(page)).toBe(0);
     await page.screenshot({ path: '/workspace/work/pk13-pc-git.png', fullPage: false });
 

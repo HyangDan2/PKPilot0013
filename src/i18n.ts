@@ -90,6 +90,11 @@ const ko = {
   gitMerging: '병합 진행 중',
   gitMergeLegacy:
     '예전 저장 형식에서 복구된 병합입니다. git merge --abort 는 HEAD로만 되돌리며, 병합 직전에 하던 작업은 복원되지 않을 수 있습니다.',
+  gitRemote: '원격',
+  gitNoRemote: '아직 원격이 없습니다. git remote add origin <주소> 로 추가해 보세요.',
+  gitNoUpstream: '업스트림 없음',
+  gitInSync: '원격과 동기화됨',
+  gitRemoteBranches: '원격 브랜치',
 
   syncConflictTitle: '다른 탭에서 이 강의를 수정했습니다',
   syncConflictBody: '이 탭에 저장하지 않은 작업이 있습니다. 덮어쓰면 다른 탭의 최근 작업이 사라집니다.',
@@ -228,6 +233,11 @@ const en: Dict = {
   gitMerging: 'Merge in progress',
   gitMergeLegacy:
     'This merge was restored from an older save. git merge --abort can only return to HEAD, so work you were doing just before the merge may not come back.',
+  gitRemote: 'Remote',
+  gitNoRemote: 'No remote yet. Add one with git remote add origin <url>.',
+  gitNoUpstream: 'No upstream',
+  gitInSync: 'In sync with remote',
+  gitRemoteBranches: 'Remote branches',
 
   syncConflictTitle: 'This lesson was changed in another tab',
   syncConflictBody: 'This tab has unsaved work. Overwriting it discards the other tab’s latest changes.',
