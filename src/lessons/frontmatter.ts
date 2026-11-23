@@ -302,6 +302,10 @@ export function toCheck(value: unknown, field = 'check'): CheckSpec {
       return { type: 'git-branch', name: asString(record.name, `${field}.name`) };
     case 'git-merge':
       return { type: 'git-merge' };
+    case 'git-remote':
+      return { type: 'git-remote', name: optional('name') };
+    case 'git-push':
+      return { type: 'git-push', remote: optional('remote'), branch: optional('branch') };
     case 'all':
       return toCheck(record.checks, `${field}.checks`);
     default:

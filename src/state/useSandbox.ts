@@ -627,11 +627,16 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         const subs = [
           'init', 'status', 'add', 'commit', 'branch', 'switch', 'checkout', 'merge', 'rebase',
           'reset', 'log', 'diff', 'cherry-pick', 'restore', 'rm', 'show', 'help',
+          'remote', 'push', 'fetch', 'pull',
         ];
         if (tokens.length === 1) return last === 'g' ? 'git ' : null;
         if (tokens.length === 2) {
           const matches = subs.filter((sub) => sub.startsWith(last));
           return matches.length === 1 ? `git ${matches[0]} ` : null;
+        }
+        if (tokens[1] === 'remote' && tokens.length === 3) {
+          const actions = ['add', 'remove', 'set-url', '-v'].filter((action) => action.startsWith(last));
+          return actions.length === 1 ? substitute(actions[0]) : null;
         }
         if (tokens[1] === 'switch' || tokens[1] === 'merge' || tokens[1] === 'checkout') {
           const branchNames = (current.gitSnap?.branches ?? []).map((branch) => branch.name).filter((name) => name.startsWith(last));

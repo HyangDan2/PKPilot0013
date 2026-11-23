@@ -139,6 +139,25 @@ describe('bundled lesson catalog', () => {
     expect(Object.keys(git?.files ?? {})).toEqual(expect.arrayContaining(['README.md', 'hello.txt', 'notes.md']));
   });
 
+  it('takes the Git lesson from init to push in six missions', () => {
+    const git = lessonById('git-basics');
+    expect(git?.missions.map((mission) => mission.id)).toEqual([
+      'git-init',
+      'git-first-commit',
+      'git-branch',
+      'git-merge',
+      'git-remote',
+      'git-push',
+    ]);
+    expect(git?.missions.at(-1)?.check).toEqual({ type: 'git-push', remote: 'origin', branch: 'main' });
+    expect(git?.missions[4].check).toEqual({ type: 'git-remote', name: 'origin' });
+    // The starting README is the map the learner follows: it has to name the
+    // remote and push steps, and say to merge from main.
+    expect(git?.files['README.md']).toContain('git remote add origin');
+    expect(git?.files['README.md']).toContain('git push -u origin main');
+    expect(git?.files['README.md']).toContain('반드시 main 에서');
+  });
+
   it('writes material with headings, a table and a code block', () => {
     for (const lesson of LESSONS) {
       expect(lesson.body).toMatch(/^##\s/m);

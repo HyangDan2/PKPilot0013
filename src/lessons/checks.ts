@@ -48,7 +48,19 @@ export function evaluateCheck(check: CheckSpec, state: LessonState): boolean {
       return ahead >= 1;
     }
     case 'git-merge':
-      return state.gitMergeCommits >= 1;
+      // A merge is "두 브랜치를 합쳤다" whether git had to make a merge commit or
+      // could simply fast-forward: both put the other branch's work on this one.
+      return state.gitMergeCommits >= 1 || state.gitFastForwards >= 1;
+    case 'git-remote': {
+      const named = check.name ? state.gitRemotes.filter((remote) => remote.name === check.name) : state.gitRemotes;
+      return named.some((remote) => remote.url.trim() !== '');
+    }
+    case 'git-push': {
+      const remote = check.remote ?? 'origin';
+      const branch = check.branch ?? 'main';
+      const pushed = state.gitRemoteBranches.find((item) => item.ref === `${remote}/${branch}`);
+      return !!pushed && !!pushed.sha && pushed.contained;
+    }
     case 'all':
       return check.checks.every((item) => evaluateCheck(item, state));
     default:

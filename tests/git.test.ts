@@ -57,6 +57,25 @@ describe('git engine', () => {
     expect(log).toMatch(/HEAD -> main/);
   });
 
+  it('lists the newest commit first, so a merge sits at the top', () => {
+    const repo = bootstrap();
+    commitAll(repo, 'base');
+    repo.exec('git switch -c feature');
+    repo.workdir['feature.txt'] = 'feature\n';
+    commitAll(repo, 'feature 작업');
+    repo.exec('git switch main');
+    repo.workdir['README.md'] = `${repo.workdir['README.md']}\nmain 쪽 변경`;
+    commitAll(repo, 'main 작업');
+    repo.exec('git merge feature');
+
+    const lines = repo
+      .exec('git log --oneline')
+      .lines.map((line) => line.text);
+    expect(lines[0]).toContain("Merge branch 'feature'");
+    expect(lines[0]).toContain('HEAD -> main');
+    expect(lines[lines.length - 1]).toContain('base');
+  });
+
   it('rejects an empty commit and an empty message', () => {
     const repo = bootstrap();
     commitAll(repo, 'base');

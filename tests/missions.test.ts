@@ -34,6 +34,9 @@ const pythonState = (lessonId: string, overrides: Partial<LessonState> = {}): Le
   gitBranch: null,
   gitBranches: [],
   gitMainTip: null,
+  gitRemotes: [],
+  gitRemoteBranches: [],
+  gitFastForwards: 0,
   ...overrides,
 });
 
@@ -133,5 +136,106 @@ describe('Git lesson missions', () => {
     commitAll(target, 'base');
     target.exec('git branch feature');
     expect(passes('git-basics', 'git-branch', gitState('git-basics', target))).toBe(false);
+  });
+
+  it('walks the lesson’s own README order to all six missions', () => {
+    const target = repo();
+    // The app awards a mission the first time its check holds and never takes it
+    // back, so the run below checks each step as the learner reaches it.
+    const done = new Set<string>();
+    const award = () => {
+      for (const mission of lesson('git-basics').missions) {
+        if (!done.has(mission.id) && passes('git-basics', mission.id, gitState('git-basics', target))) {
+          done.add(mission.id);
+        }
+      }
+    };
+    const step = (command: string) => {
+      const result = target.exec(command);
+      award();
+      return result;
+    };
+
+    step('git init');
+    target.workdir['hello.txt'] = `${target.workdir['hello.txt']}\n한 줄 추가`;
+    step('git add .');
+    step('git commit -m "첫 커밋"');
+
+    // 3–4: branch, and a commit of its own that touches notes.md
+    step('git switch -c feature');
+    target.workdir['notes.md'] = `${target.workdir['notes.md']}\n- feature 브랜치에서 적은 메모`;
+    step('git add .');
+    step('git commit -m "메모 추가"');
+    expect(done.has('git-branch')).toBe(true);
+
+    // 5: back on main, a commit that touches a different file
+    step('git switch main');
+    target.workdir['README.md'] = `${target.workdir['README.md']}\n한 줄 추가`;
+    step('git add .');
+    step('git commit -m "README 정리"');
+
+    // 6: the merge itself
+    const merge = step('git merge feature');
+    expect(merge.exit).toBe(0);
+    expect(merge.lines.map((line) => line.text).join('\n')).toContain("Merge made by the 'ort' strategy.");
+    expect(target.workdir['notes.md']).toContain('feature 브랜치에서 적은 메모');
+    expect(target.workdir['README.md']).toContain('한 줄 추가');
+    expect(done.has('git-merge')).toBe(true);
+
+    // 7–8: the remote, then the push
+    expect(step('git remote add origin https://github.com/learner/playground.git').exit).toBe(0);
+    expect(step('git push -u origin main').exit).toBe(0);
+    expect(done.has('git-remote')).toBe(true);
+    expect(done.has('git-push')).toBe(true);
+
+    expect([...done].sort()).toEqual(lesson('git-basics').missions.map((mission) => mission.id).sort());
+  });
+
+  it('accepts a fast-forward merge — no extra commit on main', () => {
+    const target = repo();
+    target.exec('git init');
+    commitAll(target, 'base');
+    target.exec('git switch -c feature');
+    target.workdir['notes.md'] = `${target.workdir['notes.md']}\n- feature`;
+    commitAll(target, 'feature 작업');
+    target.exec('git switch main');
+
+    expect(passes('git-basics', 'git-merge', gitState('git-basics', target))).toBe(false);
+    const merge = target.exec('git merge feature');
+    expect(merge.lines.map((line) => line.text)).toContain('Fast-forward');
+    expect(passes('git-basics', 'git-merge', gitState('git-basics', target))).toBe(true);
+  });
+
+  it('does not pass the merge while standing on the branch being merged', () => {
+    const target = repo();
+    target.exec('git init');
+    commitAll(target, 'base');
+    target.exec('git switch -c feature');
+    target.workdir['notes.md'] = `${target.workdir['notes.md']}\n- feature`;
+    commitAll(target, 'feature 작업');
+
+    const here = target.exec('git merge feature');
+    expect(here.lines.map((line) => line.text).join('\n')).toContain('Already up to date.');
+    expect(here.lines.map((line) => line.text).join('\n')).toContain('git switch main');
+    expect(passes('git-basics', 'git-merge', gitState('git-basics', target))).toBe(false);
+  });
+
+  it('wants a remote with a URL, and a pushed main', () => {
+    const target = repo();
+    target.exec('git init');
+    commitAll(target, 'base');
+    expect(passes('git-basics', 'git-remote', gitState('git-basics', target))).toBe(false);
+    target.exec('git remote add origin https://github.com/learner/playground.git');
+    expect(passes('git-basics', 'git-remote', gitState('git-basics', target))).toBe(true);
+    expect(passes('git-basics', 'git-push', gitState('git-basics', target))).toBe(false);
+
+    target.exec('git push -u origin main');
+    expect(passes('git-basics', 'git-push', gitState('git-basics', target))).toBe(true);
+
+    // A local commit after the push keeps the mission done: the remote tip is
+    // still part of main's history.
+    target.workdir['README.md'] = `${target.workdir['README.md']}\n한 줄 더`;
+    commitAll(target, '추가 작업');
+    expect(passes('git-basics', 'git-push', gitState('git-basics', target))).toBe(true);
   });
 });

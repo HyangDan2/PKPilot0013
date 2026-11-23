@@ -15,9 +15,9 @@ The IDE shell is written once. A new course is a new markdown file.
 | Lesson | Runtime | Panel slots | What the learner does |
 | --- | --- | --- | --- |
 | **Python Hello World** | Real CPython 3.13 via [Pyodide](https://pyodide.org) (WASM, fetched from jsDelivr on first run) | `output` | Prints, f-strings, a `for` loop and `sum()` — run with the button, `Ctrl+Enter` or `python main.py` |
-| **Git Basics** | A purpose-built educational Git engine (in-memory tree snapshots) | `git-graph`, `working-tree` | `init`, `add`, `commit`, `switch -c`, `merge` — watching the commit graph and staging area change |
+| **Git Basics** | A purpose-built educational Git engine (in-memory tree snapshots, a virtual `origin`) | `git-graph`, `working-tree` | `init`, `add`, `commit`, `switch -c`, `merge`, `remote add`, `push` — watching the commit graph, the staging area and the remote change |
 
-Both lessons are bilingual (KO/EN) and carry four missions each, plus a free-practice mode.
+Both lessons are bilingual (KO/EN); Python Hello World carries four missions and Git Basics six, plus a free-practice mode.
 
 ## How a lesson is defined
 
@@ -53,7 +53,10 @@ missions:
   (`output`, `git-graph`, `working-tree`). Unknown ids fail the build-time parse.
 - Mission checks are declarative and evaluated against the live sandbox state after every command:
   `ran`, `stdout-contains`, `stdout-matches`, `stdout-lines`, `file-contains`, `file-matches`,
-  `git-init`, `git-commits`, `git-branch`, `git-merge`, or an `all` list of those.
+  `git-init`, `git-commits`, `git-branch`, `git-merge`, `git-remote`, `git-push`, or an `all`
+  list of those. `git-merge` counts a merge commit **and** a fast-forward — both put the other
+  branch's work on this one — and `git-push` holds while the pushed remote tip is still part of
+  the local branch.
 - A broken lesson (unknown runtime/panel, missing entry file, duplicate mission id, bad regex) is
   rejected by `LessonParseError`, and the unit suite parses every bundled lesson.
 
@@ -92,9 +95,9 @@ does the same, and a failed CDN download leaves nothing behind for the next try.
 hit a `SyntaxError` or was stopped never counts as a finished mission.
 
 **A reload comes back where you were.** Files, the open file, completed missions, the current
-mission and — for Git — the repository itself (commits, branches, index, a pending merge) are saved
-per lesson and restored on load. Restarting a lesson clears that record and starts from the
-markdown again.
+mission and — for Git — the repository itself (commits, branches, index, a pending merge, the
+remotes and their tracking state) are saved per lesson and restored on load. Restarting a lesson
+clears that record and starts from the markdown again.
 
 A second pass (WO-07 … WO-12) tightened four more edges:
 
@@ -140,7 +143,37 @@ A third pass (WO-13 … WO-17) closed the remaining correctness gaps:
   puts it back under version control.
 
 The Git lesson's "이 실습 엔진이 단순화한 부분" section lists what the teaching engine deliberately
-simplifies (whole-tree snapshots, file-level merge, 8-character hashes, no stash/reflog/remote).
+simplifies (whole-tree snapshots, file-level merge, 8-character hashes, a virtual remote instead
+of network access, no stash/reflog/hooks).
+
+A fourth pass (WO-18) finished the Git lesson's journey and fixed its merge dead end:
+
+- **`git merge` no longer has a silent dead end.** Two things used to leave a learner stuck with
+  nothing to show: following the old README (`git switch -c feature` then `git merge feature`,
+  which git answers with *Already up to date.*), and merging after `main` had not moved (a
+  fast-forward — real work, but no merge commit, so the mission check never passed). The lesson's
+  README and body now give the exact command sequence with the file to edit at each side, name the
+  branch you must stand on, explain fast-forward versus a merge commit, and the check accepts
+  either kind of merge. `git merge feature` on `feature` itself now also prints how to get out.
+- **A virtual `origin` in the page.** `git remote add | -v | remove | set-url`, `git push`
+  (`-u`, `--force`, `main:trunk`, `--delete`, `HEAD`), `git fetch` and `git pull` all behave like
+  the real commands: a new branch line, a fast-forward update, `Everything up-to-date`, and a
+  rejected non-fast-forward push that names `git pull` and `git push --force` as the two ways out.
+  `--force` refuses nothing (it is the learner's sandbox) but says `(forced update)`.
+- **Status, log and panels tell the truth about the remote.** `git status` gains the
+  *up to date / ahead by N / behind by N / have diverged* lines, `git branch -vv` shows
+  `[origin/main: ahead 1]`, `git log --oneline` decorates the commit with `origin/main`, and the
+  working-tree card shows the remote plus a synced/ahead-behind badge while the graph lists
+  `origin/main` as a dashed chip. `git merge origin/main` works like a local branch.
+- **`git pull` is `fetch` + `merge`, literally.** It goes through the same merge code as
+  `git merge`, so a conflicting pull leaves an unresolved merge (`MERGE_HEAD`) that blocks the
+  commit and is concluded by the two-parent merge commit — and `exec()` keeps that half-finished
+  state only for `merge`/`pull`, never for a failed push.
+- **The lesson is six missions:** init → first commit → branch → merge → remote → push. The
+  starting `README.md` is that ordered map, and a unit test replays exactly those commands and
+  expects all six. The README also walks a rejected push back to a clean state through
+  `git push origin docs:main` → `git pull origin main`, so fetch/pull can be practised without a
+  second machine.
 
 ## Development
 
@@ -175,7 +208,8 @@ src/
     checks.ts          declarative mission checks against the live state
     index.ts           import.meta.glob catalog
   tracks/
-    git/repo.ts        educational Git engine (commands, three-way merge, rebase, reset)
+    git/repo.ts        educational Git engine (commands, three-way merge, rebase, reset,
+                       virtual remotes: remote/push/fetch/pull)
     git/graph.ts       lane/row layout for the commit graph
     git/diff.ts        unified diff + LCS
     python/runner.ts   Pyodide in a Web Worker: one run at a time, ids, stop,

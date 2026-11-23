@@ -39,6 +39,9 @@ const stateFor = (code: string, stdout: string): LessonState => ({
   gitBranch: null,
   gitBranches: [],
   gitMainTip: null,
+  gitRemotes: [],
+  gitRemoteBranches: [],
+  gitFastForwards: 0,
 });
 
 const check = (missionId: string, state: LessonState) =>

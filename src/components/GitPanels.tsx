@@ -35,7 +35,7 @@ export function GitGraph({ lang, snap }: GitGraphProps) {
   }
 
   const labelX = PAD_X + layout.laneCount * LANE_W + 8;
-  const width = Math.max(280, labelX + 210);
+  const width = Math.max(280, labelX + 240);
   const height = PAD_Y * 2 + layout.rowCount * ROW_H - (ROW_H - 18);
   const headSha = snap.head.sha;
 
@@ -100,6 +100,19 @@ export function GitGraph({ lang, snap }: GitGraphProps) {
             {branch.sha && <em>{branch.sha.slice(0, 7)}</em>}
           </li>
         ))}
+        {/* Remote-tracking branches last, outlined: they live on origin, not here. */}
+        {snap.remoteBranches.map((branch) => (
+          <li
+            key={branch.ref}
+            className="remote"
+            data-testid={`remote-chip-${branch.ref.replace('/', '-')}`}
+            title={snap.remotes.find((remote) => remote.name === branch.remote)?.url ?? branch.ref}
+          >
+            <span className="branch-dot" aria-hidden />
+            {branch.ref}
+            {branch.sha && <em>{branch.sha.slice(0, 7)}</em>}
+          </li>
+        ))}
       </ul>
     </div>
   );
@@ -134,6 +147,34 @@ export function GitStatus({ lang, snap }: GitGraphProps) {
           {snap.head.sha ? ` · ${snap.head.sha.slice(0, 7)}` : ''}
         </span>
       </div>
+      {/* Where this branch stands against its remote — the result of push/pull. */}
+      <p className="remote-line" data-testid="remote-line">
+        {snap.remotes.length === 0 ? (
+          <span className="remote-empty">{t(lang, 'gitNoRemote')}</span>
+        ) : (
+          <>
+            <span className="remote-name">
+              {t(lang, 'gitRemote')} · {snap.remotes.map((remote) => remote.name).join(', ')}
+            </span>
+            {snap.upstream ? (
+              <span
+                className={`remote-drift ${snap.upstream.ahead === 0 && snap.upstream.behind === 0 ? 'sync' : 'drift'}`}
+                data-testid="remote-drift"
+                title={`${snap.upstream.ref}: ↑${snap.upstream.ahead} ↓${snap.upstream.behind}`}
+              >
+                {snap.upstream.ref}
+                {snap.upstream.ahead === 0 && snap.upstream.behind === 0
+                  ? ` · ${t(lang, 'gitInSync')}`
+                  : ` ↑${snap.upstream.ahead} ↓${snap.upstream.behind}`}
+              </span>
+            ) : (
+              <span className="remote-drift" data-testid="remote-drift">
+                {t(lang, 'gitNoUpstream')}
+              </span>
+            )}
+          </>
+        )}
+      </p>
       {rows.length === 0 ? (
         <p className="viz-empty">{t(lang, 'gitClean')}</p>
       ) : (
