@@ -387,6 +387,23 @@ describe('merge counted for the lesson', () => {
     expect(repo.snapshot().stats.merges).toBe(0);
   });
 
+  it('makes a merge commit with --no-ff even where a fast-forward is possible', () => {
+    const repo = bootstrap();
+    commitAll(repo, 'base');
+    repo.exec('git switch -c feature');
+    repo.workdir['feature.txt'] = 'feature\n';
+    commitAll(repo, 'feature 작업');
+    repo.exec('git switch main');
+
+    const merge = repo.exec('git merge --no-ff feature');
+    expect(merge.exit).toBe(0);
+    expect(merge.lines.map((line) => line.text).join('\n')).toContain("Merge made by the 'ort' strategy.");
+    expect(repo.commits[repo.branches.main as string].parents).toHaveLength(2);
+    expect(repo.snapshot().stats.merges).toBe(1);
+    expect(repo.snapshot().stats.fastForwards).toBe(0);
+    expect(repo.workdir['feature.txt']).toBe('feature\n');
+  });
+
   it('merges a remote-tracking branch by name', () => {
     const repo = published();
     repo.exec('git push -u origin main');

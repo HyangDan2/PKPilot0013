@@ -211,6 +211,8 @@ git merge feature
 - 양쪽 모두에 커밋이 있으면 병합 커밋(`Merge made by the 'ort' strategy.`)이 생깁니다.
 
 두 방식 모두 정상입니다. 차이는 "이력이 갈라졌다가 합쳐진 흔적을 남기느냐" 뿐입니다.
+빠른 감기가 되어도 **항상 병합 커밋을 남기고 싶다면** `git merge --no-ff feature` 처럼
+`--no-ff` 를 붙입니다.
 
 ## 5. 원격 저장소에 올리기
 

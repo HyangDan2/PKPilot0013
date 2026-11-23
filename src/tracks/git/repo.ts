@@ -1313,7 +1313,7 @@ export class GitRepo {
     this.unmergedPaths = [];
     const theirSha = name in this.branches ? this.branches[name] : this.remoteRefs[name];
     if (!this.hasCommit(theirSha)) return fail([out(`merge: ${name} - not something we can merge`, 'err')]);
-    return this.mergeIntoHead(theirSha, name);
+    return this.mergeIntoHead(theirSha, name, { noFf: args.includes('--no-ff') });
   }
 
   /**
@@ -1321,7 +1321,7 @@ export class GitRepo {
    * resolves. Shared by `git merge` (local and remote-tracking branches) and by
    * `git pull`, so both behave the same way in every edge case.
    */
-  private mergeIntoHead(theirSha: string, label: string): CommandResult {
+  private mergeIntoHead(theirSha: string, label: string, options: { noFf?: boolean } = {}): CommandResult {
     const ourSha = this.headSha();
     if (!this.hasCommit(ourSha)) {
       // Nothing of our own yet: the checked-out branch becomes the other side.
@@ -1336,7 +1336,7 @@ export class GitRepo {
     }
     const base = this.mergeBase(ourSha, theirSha);
     if (base === theirSha) return result([out('Already up to date.', 'plain')]);
-    if (base === ourSha) {
+    if (base === ourSha && !options.noFf) {
       const theirs = this.commits[theirSha as string];
       const diffs = diffTrees(this.commits[ourSha as string].tree, theirs.tree);
       const plan = this.localChangePlan(theirs.tree);
