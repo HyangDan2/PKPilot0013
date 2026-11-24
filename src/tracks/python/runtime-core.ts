@@ -15,18 +15,47 @@ import {
   runDirectoryCleanupScript,
   vfsCleanupScript,
 } from './module-cache';
+import { parseTrace, type TraceEvent } from './trace';
 
 /** The slice of Pyodide this module needs. */
 export interface PyodideLike {
   FS: {
     mkdirTree: (path: string) => void;
     writeFile: (path: string, data: string) => void;
+    readFile: (path: string, options?: { encoding?: string }) => string;
   };
   globals: { get: (name: string) => any };
   runPython: (code: string, options?: Record<string, unknown>) => any;
   runPythonAsync: (code: string, options?: Record<string, unknown>) => Promise<any>;
   setStdout: (options: { batched: (text: string) => void }) => void;
   setStderr: (options: { batched: (text: string) => void }) => void;
+}
+
+const TRACE_FILE = '.codeplayground-trace.jsonl';
+
+/** Removes any settings a previous run left behind, then installs this run's. */
+const tracePathFor = (dir: string) => `${dir}/${TRACE_FILE}`;
+
+function installEnv(py: PyodideLike, dir: string, env: Record<string, string>): void {
+  const values = { CP_TRACE_PATH: tracePathFor(dir), ...env };
+  py.runPython(
+    [
+      'import os',
+      'for _key in [k for k in os.environ if k.startswith("LLM_") or k == "CP_TRACE_PATH"]:',
+      '    os.environ.pop(_key, None)',
+      `os.environ.update(${JSON.stringify(values)})`,
+    ].join('\n'),
+  );
+}
+
+function clearEnv(py: PyodideLike): void {
+  py.runPython(
+    [
+      'import os',
+      'for _key in [k for k in os.environ if k.startswith("LLM_") or k == "CP_TRACE_PATH"]:',
+      '    os.environ.pop(_key, None)',
+    ].join('\n'),
+  );
 }
 
 export interface ProgramRun {
@@ -37,6 +66,10 @@ export interface ProgramRun {
   dir: string;
   onStdout: (text: string) => void;
   onStderr: (text: string) => void;
+  /** Completion-lesson settings, handed to Python for this run only. */
+  env?: Record<string, string>;
+  /** Called once with whatever audit trail the program left behind. */
+  onTrace?: (events: TraceEvent[]) => void;
 }
 
 /** Where run `id` keeps its files. */
@@ -101,8 +134,27 @@ export async function executeProgram(py: PyodideLike, run: ProgramRun): Promise<
     // `import practice` finds the lesson files because the run directory is on
     // sys.path, and open('data.txt') resolves there too.
     py.runPython(`import sys, os\nsys.path.insert(0, ${JSON.stringify(run.dir)})\nos.chdir(${JSON.stringify(run.dir)})`);
+    // A completion lesson's key and prompts live in the worker's memory for the
+    // duration of this run only; `clearEnv` removes them in `finally`.
+    installEnv(py, run.dir, run.env ?? {});
     await py.runPythonAsync(run.code, { globals: namespace, filename: run.entry });
   } finally {
+    let events: TraceEvent[] = [];
+    try {
+      events = parseTrace(py.FS.readFile(tracePathFor(run.dir), { encoding: 'utf8' }));
+    } catch {
+      /* a lesson that never wrote a trace simply has no events */
+    }
+    try {
+      clearEnv(py);
+    } catch {
+      /* the interpreter may be gone; the worker's memory goes with it */
+    }
+    try {
+      run.onTrace?.(events);
+    } catch {
+      /* a panel must never break the run's cleanup */
+    }
     discardRunDirectory(py, run.dir);
     destroy(namespace);
     destroy(dictFactory);

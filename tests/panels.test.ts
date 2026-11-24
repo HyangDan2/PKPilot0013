@@ -25,5 +25,6 @@ describe('panel slot mapping', () => {
     }
     expect(panelLabel('ko', 'output')).toBe('실행 결과');
     expect(panelLabel('ko', 'working-tree')).toBe('작업 트리');
+    expect(panelLabel('ko', 'completion')).toBe('Chat Completion');
   });
 });

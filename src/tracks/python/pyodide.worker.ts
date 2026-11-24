@@ -21,6 +21,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { executeProgram, runDirectory, type PyodideLike } from './runtime-core';
+import type { TraceEvent } from './trace';
 
 const CDN = 'https://cdn.jsdelivr.net/pyodide/v0.28.3/full/';
 
@@ -58,16 +59,18 @@ function loadRuntime(): Promise<any> {
 scope.onmessage = async (event: any) => {
   const data = event?.data;
   if (!data || data.type !== 'run') return;
-  const { requestId, code, files, entry, dir } = data as {
+  const { requestId, code, files, entry, dir, env } = data as {
     requestId: number;
     code: string;
     files: Record<string, string>;
     entry: string;
     dir: string;
+    env?: Record<string, string>;
   };
   const started = Date.now();
   const stdout: string[] = [];
   const stderr: string[] = [];
+  let trace: TraceEvent[] = [];
   let ok = false;
   let error: string | undefined;
   let phase: 'load' | 'run' = 'load';
@@ -85,6 +88,10 @@ scope.onmessage = async (event: any) => {
       dir: dir || runDirectory(requestId),
       onStdout: (text: string) => stdout.push(text),
       onStderr: (text: string) => stderr.push(text),
+      env: env && typeof env === 'object' ? env : undefined,
+      onTrace: (events) => {
+        trace = events;
+      },
     });
     ok = true;
   } catch (thrown: any) {
@@ -101,5 +108,6 @@ scope.onmessage = async (event: any) => {
     phase,
     ms: Date.now() - started,
     loadMs,
+    trace,
   });
 };

@@ -16,10 +16,12 @@
  *  4. **Two separate limits.** Fetching ~10 MB of runtime and running the
  *     learner's code are different waits with different fixes: a slow first load
  *     is a connection problem (30 s), a program that never ends is a program
- *     problem (20 s). Each is reported as what it is.
+ *     problem (20 s, or a lesson's own longer limit). Each is reported as what
+ *     it is.
  *  5. **A retryable loader.** A failed CDN download leaves no half-initialised
  *     state behind, so pressing Run again really does try again.
  */
+import { sanitizeTrace, type TraceEvent } from './trace';
 export type PythonStage = 'idle' | 'script' | 'runtime' | 'ready' | 'error';
 
 export interface PythonProgress {
@@ -41,6 +43,8 @@ export interface PythonRun {
   phase?: 'load' | 'run';
   /** How long the runtime took to come up this run (0 when it was already up). */
   loadMs?: number;
+  /** Request/response audit trail, when the lesson's program wrote one. */
+  trace?: TraceEvent[];
 }
 
 export interface PythonRunOptions {
@@ -48,6 +52,8 @@ export interface PythonRunOptions {
   timeoutMs?: number;
   /** Limit for fetching and initialising Pyodide. */
   loadTimeoutMs?: number;
+  /** Lesson settings for this run; the worker clears them when it ends. */
+  env?: Record<string, string>;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -181,6 +187,7 @@ function onWorkerMessage(event: unknown) {
     ms: Math.max(0, total - loadMs),
     phase,
     loadMs,
+    trace: sanitizeTrace(data.trace),
   });
 }
 
@@ -256,6 +263,7 @@ export function runPython(
         files,
         entry,
         dir: `/tmp/codeplayground/run-${id}`,
+        env: options.env,
       });
     } catch (error) {
       disposeWorker();

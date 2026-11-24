@@ -16,8 +16,9 @@ The IDE shell is written once. A new course is a new markdown file.
 | --- | --- | --- | --- |
 | **Python Hello World** | Real CPython 3.13 via [Pyodide](https://pyodide.org) (WASM, fetched from jsDelivr on first run) | `output` | Prints, f-strings, a `for` loop and `sum()` — run with the button, `Ctrl+Enter` or `python main.py` |
 | **Git Basics** | A purpose-built educational Git engine (in-memory tree snapshots, a virtual `origin`) | `git-graph`, `working-tree` | `init`, `add`, `commit`, `switch -c`, `merge`, `remote add`, `push` — watching the commit graph, the staging area and the remote change |
+| **LLM Chat Completion Basics** | Real CPython 3.13 via Pyodide | `completion`, `output` | Builds an OpenAI-compatible request, reads the response, plays multi-turn roles, sets temperature/max tokens and streams SSE chunks — in Mock Mode with no key, or Live Mode against the learner's own Base URL |
 
-Both lessons are bilingual (KO/EN); Python Hello World carries four missions and Git Basics six, plus a free-practice mode.
+All three lessons are bilingual (KO/EN); Python Hello World carries four missions, Git Basics six and Chat Completion eight, plus a free-practice mode. Chat Completion never stores the API key: it lives in component state, travels to the worker as per-run environment variables, is masked in Python and again in the panel, and never appears in the saved session or lesson files.
 
 ## How a lesson is defined
 
@@ -91,7 +92,8 @@ index, worktree, counters — from a snapshot taken before it ran.
 time, each with its own namespace and a directory in the interpreter's virtual filesystem (so
 `main.py` can `import practice`). Every result carries the request id it was asked with, so a run
 from a lesson the learner already left is dropped. Stop terminates the worker, a 20-second timeout
-does the same, and a failed CDN download leaves nothing behind for the next try. A run that raised,
+does the same (a lesson can ask for longer with `runTimeout`, as Chat Completion does for its 60-second
+API budget), and a failed CDN download leaves nothing behind for the next try. A run that raised,
 hit a `SyntaxError` or was stopped never counts as a finished mission.
 
 **A reload comes back where you were.** Files, the open file, completed missions, the current

@@ -9,9 +9,25 @@
 export type RuntimeId = 'python' | 'git';
 
 /** Panel slots the right column can assemble. */
-export type PanelId = 'output' | 'git-graph' | 'working-tree';
+export type PanelId = 'output' | 'completion' | 'git-graph' | 'working-tree';
 
 export type Localized = { ko: string; en: string };
+
+/** Mock or live: a completion lesson runs offline by default. */
+export type CompletionMode = 'mock' | 'live';
+
+/**
+ * The connection fields a completion lesson starts with. They are lesson data,
+ * not user data: the learner's API key is entered in the panel and kept only in
+ * memory, never in the lesson, the session or a saved file.
+ */
+export interface CompletionDefaults {
+  mode: CompletionMode;
+  baseUrl: string;
+  model: string;
+  system: string;
+  user: string;
+}
 
 export type CheckSpec =
   | { type: 'ran' }
@@ -50,6 +66,10 @@ export interface Lesson {
   missions: LessonMission[];
   /** Markdown body below the frontmatter — the lesson material. */
   body: string;
+  /** Per-lesson run limit, in ms. Falls back to the runtime's own 20 s. */
+  runTimeoutMs?: number;
+  /** Connection defaults for a lesson that talks to a chat completion API. */
+  completion?: CompletionDefaults;
 }
 
 /** The live state a mission check is evaluated against. */

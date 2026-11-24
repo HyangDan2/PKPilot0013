@@ -67,11 +67,18 @@ beforeEach(() => {
 describe('Python runtime protocol', () => {
   it('sends one request per run and routes stdout, stderr and errors by id', async () => {
     const created = useFakeWorkers();
-    const pending = runPython('print(1)', { 'main.py': 'print(1)' }, 'main.py');
+    const pending = runPython('print(1)', { 'main.py': 'print(1)' }, 'main.py', {
+      env: { LLM_MODE: 'mock', LLM_API_KEY: 'sk-test' },
+    });
 
     const worker = created[0];
     expect(worker.sent).toHaveLength(1);
-    expect(worker.sent[0]).toMatchObject({ type: 'run', requestId: 1, entry: 'main.py' });
+    expect(worker.sent[0]).toMatchObject({
+      type: 'run',
+      requestId: 1,
+      entry: 'main.py',
+      env: { LLM_MODE: 'mock', LLM_API_KEY: 'sk-test' },
+    });
     expect(isPythonBusy()).toBe(true);
 
     worker.send({ type: 'progress', stage: 'script', percent: 12 });
@@ -84,9 +91,16 @@ describe('Python runtime protocol', () => {
       stdout: '1',
       stderr: 'warn',
       ms: 12,
+      trace: [{ kind: 'request', data: { url: 'mock://classroom' } }, { kind: 'bogus' }],
     });
 
-    await expect(pending).resolves.toMatchObject({ ok: true, stdout: '1', stderr: 'warn', ms: 12 });
+    await expect(pending).resolves.toMatchObject({
+      ok: true,
+      stdout: '1',
+      stderr: 'warn',
+      ms: 12,
+      trace: [{ kind: 'request', data: { url: 'mock://classroom' } }],
+    });
     expect(isPythonBusy()).toBe(false);
     expect(pythonStatus().stage).toBe('ready');
   });

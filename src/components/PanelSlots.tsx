@@ -8,11 +8,13 @@ import { t, type Lang } from '../i18n';
 import type { PanelId } from '../lessons/types';
 import type { GitSnapshot } from '../tracks/git/repo';
 import type { PythonProgress } from '../tracks/python/runner';
+import type { CompletionSettings } from '../state/completion';
 import type { RunOutput } from '../state/useSandbox';
+import { CompletionPanel } from './CompletionPanel';
 import { GitGraph, GitStatus } from './GitPanels';
 import { PythonOutput } from './Visualizers';
 
-export const PANEL_ORDER: PanelId[] = ['output', 'git-graph', 'working-tree'];
+export const PANEL_ORDER: PanelId[] = ['output', 'completion', 'git-graph', 'working-tree'];
 
 export const DEFAULT_PANELS: Record<'python' | 'git', PanelId[]> = {
   python: ['output'],
@@ -32,9 +34,15 @@ export function resolvePanels(declared: readonly string[], fallback: PanelId[] =
 
 export const panelLabel = (lang: Lang, id: PanelId): string => {
   if (id === 'output') return t(lang, 'outputPython');
+  if (id === 'completion') return t(lang, 'completionTitle');
   if (id === 'git-graph') return t(lang, 'gitGraph');
   return t(lang, 'gitWorktree');
 };
+
+interface CompletionSlot {
+  settings: CompletionSettings | null;
+  onChange: (patch: Partial<CompletionSettings>) => void;
+}
 
 interface PanelSlotsProps {
   lang: Lang;
@@ -45,9 +53,20 @@ interface PanelSlotsProps {
   progress: PythonProgress;
   running: boolean;
   staleRun?: boolean;
+  completion?: CompletionSlot | null;
 }
 
-export function PanelSlots({ lang, declared, fallback, gitSnap, run, progress, running, staleRun = false }: PanelSlotsProps) {
+export function PanelSlots({
+  lang,
+  declared,
+  fallback,
+  gitSnap,
+  run,
+  progress,
+  running,
+  staleRun = false,
+  completion = null,
+}: PanelSlotsProps) {
   const panels = resolvePanels(declared, fallback);
   return (
     <>
@@ -55,6 +74,16 @@ export function PanelSlots({ lang, declared, fallback, gitSnap, run, progress, r
         <div className="slot" key={id} data-panel={id}>
           {id === 'output' && (
             <PythonOutput lang={lang} run={run} progress={progress} running={running} stale={staleRun} />
+          )}
+          {id === 'completion' && completion && (
+            <CompletionPanel
+              lang={lang}
+              settings={completion.settings}
+              onChange={completion.onChange}
+              run={run}
+              running={running}
+              stale={staleRun}
+            />
           )}
           {id === 'git-graph' && <GitGraph lang={lang} snap={gitSnap} />}
           {id === 'working-tree' && <GitStatus lang={lang} snap={gitSnap} />}

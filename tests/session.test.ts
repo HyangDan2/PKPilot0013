@@ -24,6 +24,8 @@ import { __setPythonWorkerFactory } from '../src/tracks/python/runner';
 
 const gitLesson = lessonById('git-basics') as Lesson;
 const pythonLesson = lessonById('python-hello') as Lesson;
+const chatLesson = lessonById('chat-completion') as Lesson;
+const SECRET = 'sk-test-SECRET-123456';
 
 interface Harness {
   api: SandboxApi;
@@ -365,8 +367,58 @@ describe('WO-11 · a run belongs to the source it was produced from', () => {
   });
 });
 
-describe('WO-12 · a lesson with no files at all', () => {
-  it('keeps an empty working tree through a reload and creates the next file from it', async () => {
+describe('chat completion · the key lives in memory only', () => {
+  it('hands the key to the worker but never writes it to the session', async () => {
+    const workers = installFakeWorkers();
+    const first = mount(chatLesson);
+    try {
+      act(() => {
+        first.api.setCompletion({
+          mode: 'live',
+          baseUrl: 'https://provider.example/v1',
+          apiKey: SECRET,
+          model: 'test-model',
+        });
+      });
+      let pending!: Promise<void>;
+      act(() => {
+        pending = first.api.submit('python main.py');
+      });
+      expect(workers[0].sent[0]).toMatchObject({
+        type: 'run',
+        env: {
+          LLM_MODE: 'live',
+          LLM_BASE_URL: 'https://provider.example/v1',
+          LLM_API_KEY: SECRET,
+          LLM_MODEL: 'test-model',
+        },
+      });
+      workers[0].finish('mode: live');
+      await act(async () => {
+        await pending;
+      });
+      await settleStorage();
+
+      expect(first.api.completion?.apiKey).toBe(SECRET);
+      expect(first.api.session.lastRun?.stdout).toBe('mode: live');
+      expect(JSON.stringify(first.api.session)).not.toContain(SECRET);
+      expect(JSON.stringify(window.localStorage)).not.toContain(SECRET);
+    } finally {
+      first.unmount();
+    }
+
+    const second = mount(chatLesson);
+    try {
+      expect(second.api.completion?.apiKey).toBe('');
+      expect(second.api.completion?.mode).toBe('mock');
+      expect(JSON.stringify(second.api.session)).not.toContain(SECRET);
+    } finally {
+      second.unmount();
+    }
+  });
+});
+
+describe('WO-12 · a lesson with no files at all', () => {  it('keeps an empty working tree through a reload and creates the next file from it', async () => {
     const first = mount(gitLesson);
     await first.submit('git init');
     await first.submit('git add .');

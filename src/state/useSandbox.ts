@@ -27,6 +27,7 @@ import type { CommandResult, OutLine, RuntimeId } from '../tracks/types';
 import { out } from '../tracks/types';
 import { evaluateCheck } from '../lessons/checks';
 import { lessonState, sourceHash } from './lesson-state';
+import { completionEnv, initialCompletion, type CompletionSettings } from './completion';
 import { t, type Lang } from '../i18n';
 import type { Lesson } from '../lessons/types';
 import {
@@ -94,6 +95,10 @@ export interface SandboxApi {
   complete: (input: string) => string | null;
   selectMission: (index: number) => void;
   toggleHint: () => void;
+  /** Connection fields for a completion lesson; null for every other lesson. */
+  completion: CompletionSettings | null;
+  /** Patches the in-memory settings — the API key never leaves this object. */
+  setCompletion: (patch: Partial<CompletionSettings>) => void;
 }
 
 export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
@@ -111,6 +116,13 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const toastTimer = useRef<number | null>(null);
   const langRef = useRef(lang);
   langRef.current = lang;
+
+  const [completion, setCompletionState] = useState<CompletionSettings | null>(() => initialCompletion(lesson));
+  const completionRef = useRef(completion);
+  completionRef.current = completion;
+  const setCompletion = useCallback((patch: Partial<CompletionSettings>) => {
+    setCompletionState((previous) => (previous ? { ...previous, ...patch } : previous));
+  }, []);
 
   const engine = useRef<GitRepo | null>(boot.current.repo);
   /** The stored revision this tab is working from — bumped by every write. */
@@ -306,13 +318,16 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       }
       const generationAtStart = generation.current;
       const hashAtStart = sourceHash(current.files);
+      const settings = completionRef.current;
+      const runLimitMs = lesson.runTimeoutMs ?? RUN_TIMEOUT_MS;
       runningRef.current = true;
       setRunning(true);
       const poll = window.setInterval(() => setPyProgress({ ...pythonStatus() }), 200);
       try {
         const run = await runPython(code, current.files, file, {
-          timeoutMs: RUN_TIMEOUT_MS,
+          timeoutMs: runLimitMs,
           loadTimeoutMs: LOAD_TIMEOUT_MS,
+          env: settings ? completionEnv(settings) : undefined,
         });
         setPyProgress({ ...pythonStatus() });
         if (generationAtStart !== generation.current) {
@@ -334,7 +349,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
             ),
           );
         } else if (run.error === 'timeout') {
-          lines.push(out(langRef.current === 'ko' ? `실행 시간이 ${RUN_TIMEOUT_MS / 1000}초를 넘어 중단했습니다.` : `Stopped after ${RUN_TIMEOUT_MS / 1000}s.`, 'warn'));
+          lines.push(out(langRef.current === 'ko' ? `실행 시간이 ${runLimitMs / 1000}초를 넘어 중단했습니다.` : `Stopped after ${runLimitMs / 1000}s.`, 'warn'));
         } else if (run.error === 'busy') {
           lines.push(out(langRef.current === 'ko' ? '이미 실행 중입니다.' : 'Already running.', 'warn'));
         } else if (run.error) {
@@ -360,6 +375,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
               loadMs: run.loadMs,
               // Which source this output belongs to — a later edit makes it stale.
               sourceHash: hashAtStart,
+              trace: run.trace,
             },
             lastStdout: run.stdout,
             lastStderr: run.stderr,
@@ -372,7 +388,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         setRunning(false);
       }
     },
-    [],
+    [lesson.runTimeoutMs],
   );
 
   const pythonTerminal = useCallback(
@@ -696,11 +712,13 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       complete,
       selectMission,
       toggleHint,
+      completion,
+      setCompletion,
     }),
     [
       lesson, runtime, session, activeMission, running, pyProgress, staleRun, toast, syncConflict, resolveSync, submit,
       runActive, stopRun, setFile, openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete,
-      selectMission, toggleHint,
+      selectMission, toggleHint, completion, setCompletion,
     ],
   );
 }

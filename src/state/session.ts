@@ -16,6 +16,7 @@
 import { GitRepo, type GitRepoState } from '../tracks/git/repo';
 import type { Lesson } from '../lessons/types';
 import type { OutLine } from '../tracks/types';
+import type { TraceEvent } from '../tracks/python/trace';
 
 export interface TermEntry {
   id: number;
@@ -40,6 +41,8 @@ export interface RunOutput {
   loadMs?: number;
   /** Fingerprint of the files this output was produced from (see `sourceHash`). */
   sourceHash?: string;
+  /** Request/response audit trail for a completion lesson (never persisted). */
+  trace?: TraceEvent[];
 }
 
 export interface Session {

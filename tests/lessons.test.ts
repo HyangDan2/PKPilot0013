@@ -79,6 +79,61 @@ describe('frontmatter reader', () => {
     expect(() => parseLessonDoc(badPanel)).toThrow(/unknown panel "nope"/);
   });
 
+  it('reads completion defaults and a per-lesson run limit', () => {
+    const lesson = parseLessonDoc(
+      [
+        '---',
+        'id: chat',
+        'title: 대화',
+        'subtitle: Chat',
+        'runtime: python',
+        'runTimeout: 60',
+        'panels: [completion, output]',
+        'completion:',
+        '  mode: mock',
+        '  baseUrl: ""',
+        '  model: classroom-mock-1',
+        '  system: 너는 선생님이야',
+        '  user: 안녕',
+        'files:',
+        '  main.py: |',
+        '    print(1)',
+        '---',
+        '본문입니다.',
+      ].join('\n'),
+    );
+    expect(lesson.runTimeoutMs).toBe(60_000);
+    expect(lesson.completion).toEqual({
+      mode: 'mock',
+      baseUrl: '',
+      model: 'classroom-mock-1',
+      system: '너는 선생님이야',
+      user: '안녕',
+    });
+  });
+
+  it('rejects a completion panel without its section or with an unknown mode', () => {
+    const base = (extra: string[]) =>
+      [
+        '---',
+        'id: chat',
+        'title: 대화',
+        'subtitle: Chat',
+        'runtime: python',
+        'panels: [completion, output]',
+        ...extra,
+        'files:',
+        '  main.py: |',
+        '    print(1)',
+        '---',
+        '본문입니다.',
+      ].join('\n');
+    expect(() => parseLessonDoc(base([]))).toThrow(/needs a "completion" section/);
+    expect(() =>
+      parseLessonDoc(base(['completion:', '  mode: pretend', '  model: m'])),
+    ).toThrow(/must be "mock" or "live"/);
+  });
+
   it('rejects an unknown runtime and duplicate mission ids', () => {
     const lesson = (overrides: string[]) =>
       ['---', 'id: x', 'title: T', 'subtitle: S', 'runtime: python', 'files:', '  a.py: |', '    pass', ...overrides, '---', 'body'].join('\n');
@@ -106,15 +161,17 @@ describe('frontmatter reader', () => {
 });
 
 describe('bundled lesson catalog', () => {
-  it('ships the two starter lessons in order', () => {
-    expect(LESSONS.map((lesson) => lesson.id)).toEqual(['python-hello', 'git-basics']);
+  it('ships the bundled lessons in order', () => {
+    expect(LESSONS.map((lesson) => lesson.id)).toEqual(['python-hello', 'git-basics', 'chat-completion']);
     expect(lessonById('python-hello')?.runtime).toBe('python');
     expect(lessonById('git-basics')?.runtime).toBe('git');
+    expect(lessonById('chat-completion')?.runtime).toBe('python');
   });
 
   it('declares the panel slots each runtime needs', () => {
     expect(lessonById('python-hello')?.panels).toEqual(['output']);
     expect(lessonById('git-basics')?.panels).toEqual(['git-graph', 'working-tree']);
+    expect(lessonById('chat-completion')?.panels).toEqual(['completion', 'output']);
   });
 
   it('has bilingual copy, starting files and missions for every lesson', () => {
@@ -156,6 +213,32 @@ describe('bundled lesson catalog', () => {
     expect(git?.files['README.md']).toContain('git remote add origin');
     expect(git?.files['README.md']).toContain('git push -u origin main');
     expect(git?.files['README.md']).toContain('반드시 main 에서');
+  });
+
+  it('takes the chat completion lesson from settings to a three-turn chatbot', () => {
+    const chat = lessonById('chat-completion');
+    expect(chat?.missions.map((mission) => mission.id)).toEqual([
+      'chat-settings',
+      'chat-request',
+      'chat-first-call',
+      'chat-response',
+      'chat-roles',
+      'chat-parameters',
+      'chat-stream',
+      'chat-chatbot',
+    ]);
+    expect(chat?.completion).toEqual({
+      mode: 'mock',
+      baseUrl: '',
+      model: 'classroom-mock-1',
+      system: '너는 친절한 파이썬 선생님이야.',
+      user: '안녕! 너는 누구야?',
+    });
+    expect(chat?.runTimeoutMs).toBe(60_000);
+    expect(chat?.files['llm_client.py']).toContain('async def chat(');
+    expect(chat?.files['llm_client.py']).toContain('async def stream_chat(');
+    expect(chat?.files['main.py']).toContain('llm_client.mask_key()');
+    expect(chat?.files['chatbot.py']).toContain('TODO');
   });
 
   it('writes material with headings, a table and a code block', () => {

@@ -7,9 +7,18 @@
  * broken lesson file is caught by the unit suite instead of rendering a half
  * empty IDE.
  */
-import type { CheckSpec, Lesson, LessonMission, Localized, PanelId, RuntimeId } from './types';
+import type {
+  CheckSpec,
+  CompletionDefaults,
+  CompletionMode,
+  Lesson,
+  LessonMission,
+  Localized,
+  PanelId,
+  RuntimeId,
+} from './types';
 
-export const PANEL_IDS: PanelId[] = ['output', 'git-graph', 'working-tree'];
+export const PANEL_IDS: PanelId[] = ['output', 'completion', 'git-graph', 'working-tree'];
 export const RUNTIME_IDS: RuntimeId[] = ['python', 'git'];
 
 const DEFAULT_PANELS: Record<RuntimeId, PanelId[]> = {
@@ -248,6 +257,13 @@ const asString = (value: unknown, field: string): string => {
   return value.trim();
 };
 
+/** Like `asString`, but an omitted or empty value is a valid default. */
+const asOptionalString = (value: unknown, field: string): string => {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new LessonParseError(`"${field}" must be a string`);
+  return value;
+};
+
 const asLocalized = (value: unknown, field: string): Localized => {
   if (typeof value === 'string') return { ko: value, en: value };
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -335,6 +351,30 @@ function toMission(value: unknown, index: number): LessonMission {
   };
 }
 
+function toCompletion(value: unknown): CompletionDefaults {
+  const record = asRecord(value, 'completion');
+  const mode = (record.mode ?? 'mock') as CompletionMode;
+  if (mode !== 'mock' && mode !== 'live') {
+    throw new LessonParseError('"completion.mode" must be "mock" or "live"');
+  }
+  return {
+    mode,
+    baseUrl: asOptionalString(record.baseUrl, 'completion.baseUrl'),
+    model: asOptionalString(record.model, 'completion.model'),
+    system: asOptionalString(record.system, 'completion.system'),
+    user: asOptionalString(record.user, 'completion.user'),
+  };
+}
+
+function toRunTimeoutMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new LessonParseError('"runTimeout" must be a positive number of seconds');
+  }
+  return Math.round(seconds * 1000);
+}
+
 export function lessonFromData(data: Record<string, unknown>, body: string, file = 'lesson.md'): Lesson {
   const runtime = asString(data.runtime, 'runtime') as RuntimeId;
   if (!RUNTIME_IDS.includes(runtime)) {
@@ -365,6 +405,11 @@ export function lessonFromData(data: Record<string, unknown>, body: string, file
     ids.add(mission.id);
   }
 
+  const completion = data.completion === undefined || data.completion === null ? undefined : toCompletion(data.completion);
+  if (panels.includes('completion') && !completion) {
+    throw new LessonParseError(`${file}: the "completion" panel needs a "completion" section`);
+  }
+
   return {
     id: asString(data.id, 'id'),
     title: asLocalized(data.title, 'title'),
@@ -377,6 +422,8 @@ export function lessonFromData(data: Record<string, unknown>, body: string, file
     files,
     missions,
     body,
+    runTimeoutMs: toRunTimeoutMs(data.runTimeout),
+    completion,
   };
 }
 
