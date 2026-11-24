@@ -384,6 +384,7 @@ describe('WO-05 · branch mission is tied to the branch’s own history', () => 
     runs: 0,
     stdout: '',
     stderr: '',
+    trace: [],
     history: [],
     lastCommand: '',
     ...gitFields(repo.snapshot()),

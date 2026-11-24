@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { evaluateCheck } from '../src/lessons/checks';
 import { lessonById } from '../src/lessons';
 import type { Lesson, LessonState } from '../src/lessons/types';
+import { parseTrace } from '../src/tracks/python/trace';
 
 const lesson = lessonById('chat-completion') as Lesson;
 const KEY = 'sk-test-SECRET-123456';
@@ -28,13 +29,20 @@ const hasPython = (() => {
   }
 })();
 
-const baseState = (code: string, stdout: string, files: Record<string, string> = {}): LessonState => ({
+const baseState = (
+  code: string,
+  stdout: string,
+  files: Record<string, string> = {},
+  traceText = '',
+): LessonState => ({
   runtime: 'python',
   files: { ...lesson.files, 'main.py': code, ...files },
   active: 'main.py',
   runs: 1,
   stdout,
   stderr: '',
+  // The real JSONL the run would have left behind, read the same way the app reads it.
+  trace: parseTrace(traceText),
   history: ['python main.py'],
   lastCommand: 'python main.py',
   gitInitialized: false,
@@ -211,35 +219,39 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
     expect(callTrace).not.toContain(KEY);
     expect(callTrace).toContain('Bearer sk-t••••3456');
     const events = callTrace.trim().split('\n').map((line) => JSON.parse(line) as { kind: string });
-    expect(events.map((event) => event.kind)).toEqual(['request', 'response', 'assistant', 'usage']);
+    // build_request records the preview, then chat records the actual send.
+    expect(events.map((event) => event.kind)).toEqual(['preview', 'request', 'response', 'assistant', 'usage']);
     expect(trace).toBe('');
   });
 
   it('builds the request JSON the second mission reads', () => {
-    const { stdout } = execute(requestCode);
+    const { stdout, trace } = execute(requestCode);
     expect(stdout).toContain('"messages"');
     expect(stdout).toContain('"temperature": 0.7');
     expect(stdout).toContain('"max_tokens": 200');
-    expect(passes('chat-request', baseState(requestCode, stdout))).toBe(true);
+    expect(passes('chat-request', baseState(requestCode, stdout, {}, trace))).toBe(true);
+    // A preview is not a send: building the request must not fabricate a request event.
+    const kinds = trace.trim().split('\n').map((line) => (JSON.parse(line) as { kind: string }).kind);
+    expect(kinds).toEqual(['preview']);
   });
 
   it('calls the mock and parses its response, usage and roles', () => {
     const first = execute(firstCallCode);
     expect(first.stdout).toContain('assistant: 선생님: 안녕하세요!');
-    expect(passes('chat-first-call', baseState(firstCallCode, first.stdout))).toBe(true);
+    expect(passes('chat-first-call', baseState(firstCallCode, first.stdout, {}, first.trace))).toBe(true);
 
     const parsed = execute(responseCode);
     expect(parsed.stdout).toContain('role: assistant');
     expect(parsed.stdout).toContain('finish_reason: stop');
     expect(parsed.stdout).toContain('total_tokens');
-    expect(passes('chat-response', baseState(responseCode, parsed.stdout))).toBe(true);
+    expect(passes('chat-response', baseState(responseCode, parsed.stdout, {}, parsed.trace))).toBe(true);
   });
 
   it('keeps the conversation on the second turn', () => {
-    const { stdout } = execute(rolesCode);
+    const { stdout, trace } = execute(rolesCode);
     expect(stdout).toContain('2번째 턴');
     expect(stdout).toContain('선생님:');
-    expect(passes('chat-roles', baseState(rolesCode, stdout))).toBe(true);
+    expect(passes('chat-roles', baseState(rolesCode, stdout, {}, trace))).toBe(true);
   });
 
   it('makes max_tokens cut the answer and sets finish_reason to length', () => {
@@ -247,7 +259,7 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
     expect(stdout).toContain('finish_reason: length');
     expect(trace).toContain('"max_tokens": 5');
     expect(trace).toContain('"temperature": 0.2');
-    expect(passes('chat-parameters', baseState(parametersCode, stdout))).toBe(true);
+    expect(passes('chat-parameters', baseState(parametersCode, stdout, {}, trace))).toBe(true);
   });
 
   it('assembles streaming chunks into the same assistant message', () => {
@@ -256,8 +268,9 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
     expect(stdout).toContain('assistant:');
     const kinds = trace.trim().split('\n').map((line) => (JSON.parse(line) as { kind: string }).kind);
     expect(kinds.filter((kind) => kind === 'chunk').length).toBeGreaterThan(1);
+    expect(kinds).toContain('stream');
     expect(kinds).toContain('response');
-    expect(passes('chat-stream', baseState(streamCode, stdout))).toBe(true);
+    expect(passes('chat-stream', baseState(streamCode, stdout, {}, trace))).toBe(true);
 
     const request = trace
       .trim()
@@ -289,10 +302,10 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
   });
 
   it('passes the free-practice chatbot mission after three turns', () => {
-    const { stdout } = execute(chatbotCode, 'chatbot.py');
+    const { stdout, trace } = execute(chatbotCode, 'chatbot.py');
     expect(stdout).toContain('[chatbot]');
     expect(stdout).toContain('3번째 턴');
-    const finished = baseState(lesson.files['main.py'], stdout, { 'chatbot.py': chatbotCode });
+    const finished = baseState(lesson.files['main.py'], stdout, { 'chatbot.py': chatbotCode }, trace);
     expect(passes('chat-chatbot', finished)).toBe(true);
   });
 

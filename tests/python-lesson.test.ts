@@ -31,6 +31,7 @@ const stateFor = (code: string, stdout: string): LessonState => ({
   runs: 1,
   stdout,
   stderr: '',
+  trace: [],
   history: ['python main.py'],
   lastCommand: 'python main.py',
   gitInitialized: false,

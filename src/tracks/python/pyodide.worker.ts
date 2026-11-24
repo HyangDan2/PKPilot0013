@@ -5,9 +5,14 @@
  * if it ran on the UI thread. So the interpreter lives here, in a dedicated
  * worker, and the page only ever exchanges messages:
  *
- *   page → worker   { type: 'run', requestId, code, files, entry, dir }
+ *   page → worker   { type: 'run', requestId, code, files, entry, dir, env }
  *   worker → page   { type: 'progress', stage, percent }
- *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms, phase, loadMs }
+ *   worker → page   { type: 'delta', requestId, text, at }   ← while streaming
+ *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms, phase, loadMs, trace }
+ *
+ * Every page-bound string passes through `redactText` first: the API key of the
+ * run that is starting may not reach the main thread, whatever the learner's
+ * program printed or whatever the provider echoed back.
  *
  * Every run gets a fresh namespace and its own directory inside Pyodide's
  * virtual filesystem — and both are released again when the run ends
@@ -21,7 +26,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { executeProgram, runDirectory, type PyodideLike } from './runtime-core';
-import type { TraceEvent } from './trace';
+import { redactRunText, redactText, redactTrace, sanitizeTrace, type TraceEvent } from './trace';
 
 const CDN = 'https://cdn.jsdelivr.net/pyodide/v0.28.3/full/';
 
@@ -67,6 +72,7 @@ scope.onmessage = async (event: any) => {
     dir: string;
     env?: Record<string, string>;
   };
+  const secret = typeof env?.LLM_API_KEY === 'string' ? env.LLM_API_KEY : '';
   const started = Date.now();
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -92,22 +98,35 @@ scope.onmessage = async (event: any) => {
       onTrace: (events) => {
         trace = events;
       },
+      onDelta: (data) => {
+        const record = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+        const text = typeof record.content === 'string' ? record.content : '';
+        if (!text) return;
+        // The key may be echoed by a provider; the page never sees it raw.
+        post({ type: 'delta', requestId, text: redactText(text, secret), at: Date.now() });
+      },
     });
     ok = true;
   } catch (thrown: any) {
     if (phase === 'load') loadMs = Date.now() - started;
     error = String(thrown?.message ?? thrown).replace(/\s+at .*$/s, '').trim();
   }
+  const safe = redactRunText(
+    {
+      stdout: stdout.join('\n').replace(/\n$/, ''),
+      stderr: stderr.join('\n').replace(/\n$/, ''),
+      error,
+    },
+    secret,
+  );
   post({
     type: 'done',
     requestId,
     ok,
-    stdout: stdout.join('\n').replace(/\n$/, ''),
-    stderr: stderr.join('\n').replace(/\n$/, ''),
-    error,
+    ...safe,
     phase,
     ms: Date.now() - started,
     loadMs,
-    trace,
+    trace: redactTrace(sanitizeTrace(trace), secret),
   });
 };

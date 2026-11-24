@@ -162,6 +162,8 @@ export function LessonWorkspace({ lesson, lang, theme, onLang, onTheme, onHome }
             progress={sandbox.pyProgress}
             running={sandbox.running}
             staleRun={sandbox.staleRun}
+            staleConfig={sandbox.staleConfig}
+            stream={sandbox.stream}
             completion={
               sandbox.completion
                 ? { settings: sandbox.completion, onChange: sandbox.setCompletion }

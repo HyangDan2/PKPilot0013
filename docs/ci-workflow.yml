@@ -34,7 +34,9 @@ jobs:
       - run: npm test
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
-      - name: E2E smoke (state sync, persistence, layouts)
+      - name: E2E smoke (layouts, state sync, chat completion streaming)
+        # Includes the Chat Completion @smoke case: Mock Mode run, streamed chunks,
+        # stale-after-settings-change, and a local CORS-allowed/denied provider.
         run: npx playwright test --grep @smoke
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

@@ -70,6 +70,37 @@ export interface ProgramRun {
   env?: Record<string, string>;
   /** Called once with whatever audit trail the program left behind. */
   onTrace?: (events: TraceEvent[]) => void;
+  /**
+   * A streaming lesson pushes each SSE delta here while the program is still
+   * running, through the `__cpEmit` function this module installs for Python.
+   */
+  onDelta?: (data: unknown) => void;
+}
+
+const EMIT_NAME = '__cpEmit';
+
+/**
+ * Python reaches this function with `from js import __cpEmit`. It hands over a
+ * JSON string rather than a proxy so the call stays cheap and cannot keep
+ * Pyodide objects alive after the run.
+ */
+function installEmitter(run: ProgramRun): void {
+  (globalThis as Record<string, unknown>)[EMIT_NAME] = (kind: unknown, payload: unknown) => {
+    if (kind !== 'delta') return;
+    try {
+      run.onDelta?.(JSON.parse(String(payload)));
+    } catch {
+      /* a malformed delta must not take the program down */
+    }
+  };
+}
+
+function clearEmitter(): void {
+  try {
+    delete (globalThis as Record<string, unknown>)[EMIT_NAME];
+  } catch {
+    /* a worker being torn down has nothing left to clean */
+  }
 }
 
 /** Where run `id` keeps its files. */
@@ -137,6 +168,7 @@ export async function executeProgram(py: PyodideLike, run: ProgramRun): Promise<
     // A completion lesson's key and prompts live in the worker's memory for the
     // duration of this run only; `clearEnv` removes them in `finally`.
     installEnv(py, run.dir, run.env ?? {});
+    installEmitter(run);
     await py.runPythonAsync(run.code, { globals: namespace, filename: run.entry });
   } finally {
     let events: TraceEvent[] = [];
@@ -145,6 +177,7 @@ export async function executeProgram(py: PyodideLike, run: ProgramRun): Promise<
     } catch {
       /* a lesson that never wrote a trace simply has no events */
     }
+    clearEmitter();
     try {
       clearEnv(py);
     } catch {

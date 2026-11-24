@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { createServer, type Server } from 'node:http';
 
 const overflow = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -96,7 +97,7 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
   });
 
-  test('makes a mock chat completion call and fills every panel tab', async ({ page }, testInfo) => {
+  test('@smoke makes a mock chat completion call, streams, and fills every panel tab', async ({ page }, testInfo) => {
     const errors = collectErrors(page);
 
     await page.goto('./');
@@ -129,6 +130,7 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     await expect(page.getByTestId('py-stdout')).toContainText('total_tokens:');
 
     await page.getByTestId('completion-tab-request').click();
+    await expect(page.getByTestId('completion-request-kind')).toBeVisible();
     await expect(page.getByTestId('completion-request')).toContainText('"messages"');
     await expect(page.getByTestId('completion-request')).not.toContainText('sk-');
 
@@ -142,12 +144,89 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     await expect(page.getByTestId('completion-usage')).toContainText('prompt_tokens');
     await expect(page.getByTestId('completion-usage')).toContainText('total_tokens');
 
+    // ── streaming ─────────────────────────────────────────────────────────
+    const streamCode = [
+      'import asyncio',
+      'import llm_client',
+      '',
+      'reply = asyncio.run(llm_client.stream_chat(llm_client.default_messages(), max_tokens=120))',
+      'print("chunks:", len(reply["chunks"]))',
+      'print("stream:", reply["choices"][0]["message"]["content"])',
+    ].join('\n');
+    await page.getByTestId('code-area').fill(streamCode);
+    await page.getByTestId('run').click();
+    await expect(page.getByTestId('py-stdout')).toContainText('chunks:', { timeout: 180_000 });
+
     await page.getByTestId('completion-tab-stream').click();
-    await expect(page.getByTestId('completion-stream')).toBeHidden();
+    await expect(page.getByTestId('completion-summary')).toBeVisible();
+    const chunks = Number(await page.getByTestId('completion-summary').getAttribute('data-chunks'));
+    expect(chunks).toBeGreaterThan(1);
+    await expect(page.getByTestId('completion-stream')).toContainText('선생님:');
+
+    // A settings change makes this run's answer belong to an older configuration.
+    await page.getByTestId('completion-model').fill('changed-model');
+    await expect(page.getByTestId('completion-stale')).toBeVisible();
 
     await page.screenshot({ path: testInfo.outputPath('pk13-pc-completion.png'), fullPage: false });
     expect(await overflow(page)).toBe(0);
     expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+
+  test('@smoke Live Mode reaches a CORS-allowed mock and reports a CORS-denied one', async ({ page }) => {
+    // The provider stand-in: one path allows the page's origin, the other does not.
+    const server: Server = createServer((request, response) => {
+      const allowed = (request.url ?? '').startsWith('/allowed');
+      if (allowed) {
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+        response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      }
+      if (request.method === 'OPTIONS') {
+        response.writeHead(allowed ? 204 : 403).end();
+        return;
+      }
+      const body = JSON.stringify({
+        id: 'chatcmpl-e2e',
+        object: 'chat.completion',
+        model: 'e2e-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'CORS 목 서버 응답입니다' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+      });
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = address && typeof address !== 'string' ? address.port : 0;
+
+    try {
+      await page.goto('./');
+      await page.getByTestId('lesson-card-chat-completion').click();
+      await page.getByTestId('completion-mode-live').click();
+      await page.getByTestId('completion-base-url').fill(`http://127.0.0.1:${port}/allowed`);
+      await page.getByTestId('completion-api-key').fill('sk-e2e-SECRET-1234');
+      await page.getByTestId('completion-model').fill('e2e-model');
+      await page.getByTestId('code-area').fill(
+        [
+          'import asyncio',
+          'import llm_client',
+          'reply = asyncio.run(llm_client.chat(llm_client.default_messages()))',
+          'print("assistant:", reply["choices"][0]["message"]["content"])',
+        ].join('\n'),
+      );
+      await page.getByTestId('run').click();
+      await expect(page.getByTestId('py-stdout')).toContainText('CORS 목 서버 응답입니다', { timeout: 180_000 });
+      await page.getByTestId('completion-tab-request').click();
+      await expect(page.getByTestId('completion-request')).not.toContainText('sk-e2e-SECRET-1234');
+      await expect(page.getByTestId('completion-request')).toContainText('sk-e••••1234');
+
+      // Denied: the browser blocks the request before it reaches the URL.
+      await page.getByTestId('completion-base-url').fill(`http://127.0.0.1:${port}/denied`);
+      await page.getByTestId('run').click();
+      await expect(page.getByTestId('py-error')).toContainText('네트워크 요청이 실패했습니다', { timeout: 180_000 });
+      await expect(page.getByTestId('py-error')).not.toContainText('sk-e2e-SECRET-1234');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

@@ -105,6 +105,32 @@ describe('Python runtime protocol', () => {
     expect(pythonStatus().stage).toBe('ready');
   });
 
+  it('streams deltas for the current run only, masking the key on the way', async () => {
+    const created = useFakeWorkers();
+    const secret = 'sk-test-SECRET-123456';
+    const deltas: { text: string; at: number }[] = [];
+    const pending = runPython('print(1)', { 'main.py': 'print(1)' }, 'main.py', {
+      env: { LLM_API_KEY: secret },
+      onDelta: (delta) => deltas.push(delta),
+    });
+    const worker = created[0];
+    const id = worker.lastRequestId;
+
+    worker.send({ type: 'delta', requestId: id, text: '안녕 Bearer ' + secret, at: 42 });
+    expect(deltas).toEqual([{ text: '안녕 Bearer sk-t••••3456', at: 42 }]);
+
+    // A late piece from a run the learner already left must not reach the panel.
+    worker.send({ type: 'delta', requestId: id + 99, text: 'old', at: 1 });
+    expect(deltas).toHaveLength(1);
+
+    worker.send({ type: 'done', requestId: id, ok: true, stdout: `leaked ${secret}`, stderr: '', ms: 5 });
+    const result = await pending;
+    expect(result.stdout).toBe('leaked sk-t••••3456');
+
+    worker.send({ type: 'delta', requestId: id, text: 'late', at: 2 });
+    expect(deltas).toHaveLength(1);
+  });
+
   it('refuses a second program while one is running instead of interleaving', async () => {
     const created = useFakeWorkers();
     const first = runPython('a', {}, 'main.py');

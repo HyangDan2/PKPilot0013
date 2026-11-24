@@ -9,6 +9,7 @@
  */
 import type { Lesson, LessonState } from '../lessons/types';
 import { gitFields } from '../lessons/state';
+import { configMatches, type CompletionSettings } from './completion';
 import type { RunOutput, Session } from './session';
 
 /** A short, stable fingerprint of every lesson file (paths and contents). */
@@ -29,9 +30,20 @@ export function isRunCurrent(run: RunOutput | null, files: Record<string, string
   return !!run && run.ok === true && run.sourceHash === sourceHash(files);
 }
 
-export function lessonState(lesson: Lesson, session: Session): LessonState {
+/**
+ * `completion` is the panel's current settings (with the revision they belong
+ * to). A run made under older settings describes a request the learner is no
+ * longer looking at, so it is not evidence either.
+ */
+export function lessonState(
+  lesson: Lesson,
+  session: Session,
+  completion: { settings: CompletionSettings; revision: number } | null = null,
+): LessonState {
   const snap = lesson.runtime === 'git' ? session.gitSnap : null;
-  const current = isRunCurrent(session.lastRun, session.files);
+  const current =
+    isRunCurrent(session.lastRun, session.files) &&
+    (!completion || configMatches(session.lastRun?.config, completion.settings, completion.revision));
   return {
     runtime: lesson.runtime,
     files: session.files,
@@ -40,6 +52,7 @@ export function lessonState(lesson: Lesson, session: Session): LessonState {
     // A stdout whose source has since changed is not evidence of anything.
     stdout: current ? session.lastStdout : '',
     stderr: current ? session.lastStderr : '',
+    trace: current ? session.lastRun?.trace ?? [] : [],
     history: session.history,
     lastCommand: session.lastCmd,
     ...gitFields(snap),

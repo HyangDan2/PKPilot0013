@@ -1,17 +1,19 @@
 /**
  * The `completion` slot: connection fields plus the five views a chat
- * completion request produces — request JSON, response JSON, the assistant
- * message, token usage and the SSE chunks.
+ * completion request produces — request JSON (preview or sent), response JSON,
+ * the assistant message, token usage and the SSE chunks.
  *
  * The panel is a card with tabs rather than five separate cards so the right
  * column stays readable on a laptop and on a phone. Everything it shows is
  * derived from the last run's trace; the trace was already masked by the
- * Python client, and `redactTrace` masks the key a second time here.
+ * Python client and the worker, and `redactTrace` masks the key a third time
+ * here. While a program is still running, the text and chunk count come from
+ * the worker's live `delta` messages instead of the (not yet written) trace.
  */
 import { useMemo, useState } from 'react';
 import { t, type Lang } from '../i18n';
 import type { CompletionSettings } from '../state/completion';
-import type { RunOutput } from '../state/useSandbox';
+import type { LiveStream, RunOutput } from '../state/useSandbox';
 import { redactTrace, type TraceEvent } from '../tracks/python/trace';
 
 type Tab = 'request' | 'response' | 'assistant' | 'usage' | 'stream';
@@ -95,22 +97,38 @@ interface CompletionPanelProps {
   run: RunOutput | null;
   running: boolean;
   stale: boolean;
+  staleConfig: boolean;
+  stream: LiveStream | null;
 }
 
-export function CompletionPanel({ lang, settings, onChange, run, running, stale }: CompletionPanelProps) {
+export function CompletionPanel({ lang, settings, onChange, run, running, stale, staleConfig, stream }: CompletionPanelProps) {
   const [tab, setTab] = useState<Tab>('request');
   const events = useMemo(
     () => redactTrace(run?.trace ?? [], settings?.apiKey ?? ''),
     [run?.trace, settings?.apiKey],
   );
-  const request = lastEvent(events, 'request');
+  const preview = lastEvent(events, 'preview');
+  const sent = lastEvent(events, 'request');
+  const request = sent ?? preview;
   const response = lastEvent(events, 'response');
   const assistant = assistantOf(events);
   const usage = usageOf(events);
-  const chunks = chunksOf(events);
+  const traceChunks = chunksOf(events);
+  const summary = asRecord(lastEvent(events, 'stream'));
   const failure = errorText(events, run);
   const mock = settings?.mode !== 'live';
   const hasTrace = events.length > 0;
+
+  const liveText = stream?.text ?? '';
+  const liveChunks = stream?.chunks ?? 0;
+  const chunkCount = summary && typeof summary.chunks === 'number' ? Math.max(summary.chunks, traceChunks.length) : traceChunks.length || liveChunks;
+  const ttft =
+    stream?.firstAt != null
+      ? Math.max(0, stream.firstAt - stream.startedAt)
+      : typeof summary?.ttftMs === 'number'
+        ? summary.ttftMs
+        : null;
+  const measured = stream !== null || summary !== null;
 
   const empty = running ? t(lang, 'completionWaiting') : hasTrace ? t(lang, 'completionEmpty') : t(lang, 'completionRunFirst');
 
@@ -202,6 +220,7 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale 
         <p className="completion-note">
           {t(lang, 'completionKeyNote')} {t(lang, 'completionPromptNote')}
         </p>
+        <p className="completion-note completion-warn">{t(lang, 'completionExposed')}</p>
       </div>
 
       <div className="completion-tabs" role="tablist" aria-label={t(lang, 'completionTitle')}>
@@ -226,6 +245,9 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale 
             <p className="viz-empty">{empty}</p>
           ) : (
             <>
+              <p className="completion-note" data-testid="completion-request-kind">
+                {sent !== undefined ? t(lang, 'completionSentNote') : t(lang, 'completionPreviewNote')}
+              </p>
               <pre className="out-block" data-testid="completion-request">{pretty(request)}</pre>
               <p className="completion-note">{t(lang, 'completionMasked')}</p>
             </>
@@ -243,9 +265,16 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale 
         )}
 
         {tab === 'assistant' && (
-          assistant.content ? (
+          assistant.content || (running && liveText) ? (
             <>
-              <pre className="out-block assistant" data-testid="completion-assistant">{assistant.content}</pre>
+              <pre className="out-block assistant" data-testid="completion-assistant">
+                {assistant.content || liveText}
+              </pre>
+              {running && liveText && (
+                <p className="completion-note" data-testid="completion-receiving">
+                  {t(lang, 'completionLiveNow')} · {liveChunks} {t(lang, 'completionChunks')}
+                </p>
+              )}
               {assistant.finish && (
                 <p className="completion-note">
                   finish_reason: <code>{assistant.finish}</code>
@@ -269,18 +298,33 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale 
                 </div>
               ))}
             </div>
+          ) : response !== undefined || summary !== null ? (
+            <p className="viz-note" data-testid="completion-usage-missing">{t(lang, 'completionUsageMissing')}</p>
           ) : (
             <p className="viz-empty">{empty}</p>
           )
         )}
 
         {tab === 'stream' && (
-          chunks.length > 0 ? (
+          chunkCount > 0 || liveText ? (
             <>
-              <p className="completion-note">
-                {chunks.length} {t(lang, 'completionChunks')}
-              </p>
-              <pre className="out-block assistant" data-testid="completion-stream">{chunks.join('')}</pre>
+              <div className="completion-stats" data-testid="completion-summary" data-chunks={chunkCount} data-ttft={ttft ?? ''}>
+                <div className="completion-stat">
+                  <span>{t(lang, 'completionChunks')}</span>
+                  <b>{chunkCount}</b>
+                </div>
+                <div className="completion-stat">
+                  <span>{t(lang, 'completionTtft')}</span>
+                  <b>{ttft === null ? '—' : `${ttft} ms`}</b>
+                </div>
+                <div className="completion-stat">
+                  <span>{t(lang, 'completionElapsed')}</span>
+                  <b>{running ? t(lang, 'completionLiveNow') : `${run?.ms ?? summary?.ms ?? 0} ms`}</b>
+                </div>
+              </div>
+              <pre className="out-block assistant" data-testid="completion-stream">
+                {liveText || traceChunks.join('')}
+              </pre>
             </>
           ) : (
             <p className="viz-empty">{failure || (running ? t(lang, 'completionWaiting') : t(lang, 'completionNoStream'))}</p>
@@ -288,7 +332,16 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale 
         )}
       </div>
 
-      {stale && <p className="viz-note" data-testid="completion-stale">{t(lang, 'completionStale')}</p>}
+      {stale && (
+        <p className="viz-note" data-testid="completion-stale">
+          {staleConfig ? t(lang, 'completionStaleConfig') : t(lang, 'completionStale')}
+        </p>
+      )}
+      {measured && running && (
+        <p className="viz-note">
+          {t(lang, 'completionLiveNow')} · TTFT {ttft === null ? '—' : `${ttft} ms`}
+        </p>
+      )}
     </div>
   );
 }

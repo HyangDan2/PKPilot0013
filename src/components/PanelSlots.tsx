@@ -9,7 +9,7 @@ import type { PanelId } from '../lessons/types';
 import type { GitSnapshot } from '../tracks/git/repo';
 import type { PythonProgress } from '../tracks/python/runner';
 import type { CompletionSettings } from '../state/completion';
-import type { RunOutput } from '../state/useSandbox';
+import type { LiveStream, RunOutput } from '../state/useSandbox';
 import { CompletionPanel } from './CompletionPanel';
 import { GitGraph, GitStatus } from './GitPanels';
 import { PythonOutput } from './Visualizers';
@@ -53,6 +53,8 @@ interface PanelSlotsProps {
   progress: PythonProgress;
   running: boolean;
   staleRun?: boolean;
+  staleConfig?: boolean;
+  stream?: LiveStream | null;
   completion?: CompletionSlot | null;
 }
 
@@ -65,6 +67,8 @@ export function PanelSlots({
   progress,
   running,
   staleRun = false,
+  staleConfig = false,
+  stream = null,
   completion = null,
 }: PanelSlotsProps) {
   const panels = resolvePanels(declared, fallback);
@@ -83,6 +87,8 @@ export function PanelSlots({
               run={run}
               running={running}
               stale={staleRun}
+              staleConfig={staleConfig}
+              stream={stream}
             />
           )}
           {id === 'git-graph' && <GitGraph lang={lang} snap={gitSnap} />}

@@ -6,6 +6,8 @@
  * reusable — a new lesson is a new `.md` file, not a new screen.
  */
 
+import type { TraceEvent } from '../tracks/python/trace';
+
 export type RuntimeId = 'python' | 'git';
 
 /** Panel slots the right column can assemble. */
@@ -29,6 +31,54 @@ export interface CompletionDefaults {
   user: string;
 }
 
+/**
+ * Trace checks judge what the program actually sent and received, not the
+ * words a particular mock happens to return. The same declarations pass in
+ * Mock Mode and against a real OpenAI-compatible provider.
+ */
+export interface TraceRequestCheck {
+  type: 'trace-request';
+  /** The call must be a real send (false: a preview may satisfy it). */
+  sent?: boolean;
+  messages?: string[];
+  temperature?: number;
+  maxTokens?: number;
+  stream?: boolean;
+  model?: string;
+  authorization?: 'masked' | 'absent' | 'any';
+  /** Minimum number of requests seen (multi-turn). */
+  minTurns?: number;
+  /** Some earlier assistant message must be reused before the last user turn. */
+  assistantReuse?: boolean;
+}
+
+export interface TracePreviewCheck {
+  type: 'trace-preview';
+  messages?: string[];
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface TraceResponseCheck {
+  type: 'trace-response';
+  finish?: 'stop' | 'length';
+  usage?: boolean;
+  assistant?: boolean;
+}
+
+export interface TraceStreamCheck {
+  type: 'trace-stream';
+  minChunks?: number;
+  done?: boolean;
+  assistant?: boolean;
+}
+
+export interface TraceTurnsCheck {
+  type: 'trace-turns';
+  min: number;
+  assistantReuse?: boolean;
+}
+
 export type CheckSpec =
   | { type: 'ran' }
   | { type: 'stdout-contains'; value: string }
@@ -36,6 +86,11 @@ export type CheckSpec =
   | { type: 'stdout-lines'; values: string[] }
   | { type: 'file-contains'; path?: string; value: string }
   | { type: 'file-matches'; path?: string; value: string }
+  | TraceRequestCheck
+  | TracePreviewCheck
+  | TraceResponseCheck
+  | TraceStreamCheck
+  | TraceTurnsCheck
   | { type: 'git-init' }
   | { type: 'git-commits'; min: number }
   | { type: 'git-branch'; name: string }
@@ -80,6 +135,8 @@ export interface LessonState {
   runs: number;
   stdout: string;
   stderr: string;
+  /** The current run's request/response trail, when the lesson produced one. */
+  trace: TraceEvent[];
   history: string[];
   lastCommand: string;
   gitInitialized: boolean;
