@@ -14,7 +14,7 @@
  * the index are saved after every change and restored on load.
  */
 import { GitRepo, type GitRepoState } from '../tracks/git/repo';
-import type { Lesson } from '../lessons/types';
+import type { CompletionMode, Lesson } from '../lessons/types';
 import type { OutLine } from '../tracks/types';
 import type { TraceEvent } from '../tracks/python/trace';
 
@@ -23,6 +23,23 @@ export interface TermEntry {
   kind: 'cmd' | 'out' | 'note';
   prompt?: string;
   lines: OutLine[];
+}
+
+/**
+ * The connection settings a run was made with, minus the key. A run belongs to
+ * the configuration it started with: changing the model in the panel makes the
+ * old answer stale instead of quietly counting it for the new setup.
+ */
+export interface RunConfigSnapshot {
+  mode: CompletionMode;
+  baseUrl: string;
+  model: string;
+  system: string;
+  user: string;
+  /** Fingerprint of the non-secret settings — the API key is never included. */
+  hash: string;
+  /** Bumped by every settings edit in this tab. */
+  revision: number;
 }
 
 export interface RunOutput {
@@ -41,6 +58,8 @@ export interface RunOutput {
   loadMs?: number;
   /** Fingerprint of the files this output was produced from (see `sourceHash`). */
   sourceHash?: string;
+  /** The completion settings this output belongs to; absent for other lessons. */
+  config?: RunConfigSnapshot;
   /** Request/response audit trail for a completion lesson (never persisted). */
   trace?: TraceEvent[];
 }

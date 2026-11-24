@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_TRACE_BYTES,
   MAX_TRACE_EVENTS,
+  StreamRedactor,
+  capTraceBytes,
+  limitTrace,
   maskKey,
   parseTrace,
+  redactRunText,
   redactTrace,
   sanitizeTrace,
   type TraceEvent,
@@ -48,5 +53,104 @@ describe('completion trace', () => {
     expect(JSON.stringify(events)).toContain(key);
     expect(maskKey('')).toBe('(empty)');
     expect(maskKey('short')).toBe('•••••');
+  });
+
+  it('keeps the preview, request, response, usage and stream under a chunk flood', () => {
+    const priority: TraceEvent[] = [
+      { kind: 'preview', data: { body: {} } },
+      { kind: 'request', data: { body: {} } },
+      { kind: 'response', data: { choices: [] } },
+      { kind: 'usage', data: { total_tokens: 1 } },
+      { kind: 'stream', data: { chunks: 3 } },
+    ];
+    const chunks: TraceEvent[] = Array.from({ length: 50 }, (_, index) => ({ kind: 'chunk', data: { index } }));
+    const limited = limitTrace([...priority, ...chunks], 10);
+    expect(limited).toHaveLength(10);
+    expect(limited.map((event) => event.kind)).toEqual(['preview', 'request', 'response', 'usage', 'stream', ...Array(5).fill('chunk')]);
+  });
+
+  it('enforces the byte cap on chunks but never drops the final response', () => {
+    const huge = { kind: 'chunk' as const, data: { text: 'x'.repeat(MAX_TRACE_BYTES) } };
+    const events: TraceEvent[] = [
+      huge,
+      { kind: 'response', data: { choices: [{ message: { content: 'done' } }] } },
+      { kind: 'usage', data: { total_tokens: 2 } },
+    ];
+    const capped = capTraceBytes(events);
+    expect(capped.map((event) => event.kind)).toEqual(['response', 'usage']);
+  });
+
+  it('parses the new event kinds and masks run text with the run’s own key', () => {
+    const text = [
+      '{"kind":"preview","data":{"body":{}}}',
+      '{"kind":"stream","data":{"chunks":2,"done":true}}',
+      '{"kind":"assistant","data":{"content":"hi"}}',
+    ].join('\n');
+    expect(parseTrace(text).map((event) => event.kind)).toEqual(['preview', 'stream', 'assistant']);
+    const masked = redactRunText(
+      { stdout: 'key sk-test-SECRET-123456', stderr: '', error: 'bad Bearer sk-test-SECRET-123456' },
+      'sk-test-SECRET-123456',
+    );
+    expect(masked.stdout).toBe('key sk-t••••3456');
+    expect(masked.error).toBe('bad Bearer sk-t••••3456');
+  });
+
+  it('keeps the final response, usage and stream summary after 1,000+ SSE chunks', () => {
+    const chunks = Array.from(
+      { length: 1_200 },
+      (_, index) => `{"kind":"chunk","data":{"choices":[{"delta":{"content":"${index}"}}]}}`,
+    );
+    const tail = [
+      '{"kind":"response","data":{"choices":[{"message":{"content":"done"}}]}}',
+      '{"kind":"usage","data":{"total_tokens":9}}',
+      '{"kind":"stream","data":{"chunks":1200,"done":true}}',
+    ];
+    const events = parseTrace([...chunks, ...tail].join('\n'));
+    const kinds = events.map((event) => event.kind);
+    // The response, usage and stream lines were written after the flood and survive.
+    expect(kinds).toContain('response');
+    expect(kinds).toContain('usage');
+    expect(kinds).toContain('stream');
+    expect(events).toHaveLength(MAX_TRACE_EVENTS);
+    expect(kinds.filter((kind) => kind === 'chunk')).toHaveLength(MAX_TRACE_EVENTS - 3);
+    // The newest chunks are the ones kept.
+    expect(events.filter((event) => event.kind === 'chunk').at(-1)).toMatchObject({
+      data: { choices: [{ delta: { content: '1199' } }] },
+    });
+    // Reading stops at the cap, but never before the file's final lines.
+    const underCap = parseTrace([...chunks.slice(0, 10), ...tail].join('\n'));
+    expect(underCap.map((event) => event.kind).slice(-3)).toEqual(['response', 'usage', 'stream']);
+  });
+
+  it('drops every chunk when the priority events already fill the budget', () => {
+    const events: TraceEvent[] = [
+      { kind: 'request', data: {} },
+      { kind: 'response', data: {} },
+      { kind: 'chunk', data: { index: 1 } },
+      { kind: 'chunk', data: { index: 2 } },
+    ];
+    // `slice(-0)` would have returned both chunks here.
+    expect(limitTrace(events, 2).map((event) => event.kind)).toEqual(['request', 'response']);
+  });
+
+  it('masks a key that arrives split across stream deltas', () => {
+    const key = 'sk-live-SECRET-987654';
+    const pieces = ['안녕 ', 'sk-live-SEC', 'RET-987', '654', ' 끝'];
+    const redactor = new StreamRedactor(key);
+    const cumulative = pieces.map((piece) => redactor.push(piece));
+    // Each push is the masked *whole* stream, not an appendable delta.
+    expect(cumulative.at(-1)).toBe('안녕 sk-l••••7654 끝');
+    expect(cumulative[3]).toBe('안녕 sk-l••••7654');
+    for (const text of cumulative) expect(text).not.toContain(key);
+    // A panel that only kept the pieces can mask the join instead.
+    expect(StreamRedactor.join(pieces, key)).toBe('안녕 sk-l••••7654 끝');
+  });
+
+  it('masks a key echoed as a JSON key, not only as a value', () => {
+    const key = 'sk-live-SECRET-987654';
+    const redacted = redactTrace([{ kind: 'response', data: { usage: { [key]: key } } }], key);
+    const dump = JSON.stringify(redacted);
+    expect(dump).not.toContain(key);
+    expect(dump).toContain('sk-l••••7654');
   });
 });

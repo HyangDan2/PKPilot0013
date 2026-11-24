@@ -322,12 +322,70 @@ export function toCheck(value: unknown, field = 'check'): CheckSpec {
       return { type: 'git-remote', name: optional('name') };
     case 'git-push':
       return { type: 'git-push', remote: optional('remote'), branch: optional('branch') };
+    case 'trace-request': {
+      const sent = record.sent === undefined || record.sent === null ? undefined : record.sent === true;
+      const authorization = optional('authorization');
+      if (authorization && !['masked', 'absent', 'any'].includes(authorization)) {
+        throw new LessonParseError(`"${field}.authorization" must be masked, absent or any`);
+      }
+      return {
+        type: 'trace-request',
+        sent,
+        messages: record.messages === undefined || record.messages === null ? undefined : asStringList(record.messages, `${field}.messages`),
+        temperature: optionalNumber(record.temperature, `${field}.temperature`),
+        maxTokens: optionalNumber(record.maxTokens, `${field}.maxTokens`),
+        stream: record.stream === undefined || record.stream === null ? undefined : record.stream === true,
+        model: optional('model'),
+        authorization: authorization as 'masked' | 'absent' | 'any' | undefined,
+        minTurns: optionalNumber(record.minTurns, `${field}.minTurns`),
+        assistantReuse: record.assistantReuse === undefined || record.assistantReuse === null ? undefined : record.assistantReuse === true,
+      };
+    }
+    case 'trace-preview':
+      return {
+        type: 'trace-preview',
+        messages: record.messages === undefined || record.messages === null ? undefined : asStringList(record.messages, `${field}.messages`),
+        temperature: optionalNumber(record.temperature, `${field}.temperature`),
+        maxTokens: optionalNumber(record.maxTokens, `${field}.maxTokens`),
+      };
+    case 'trace-response': {
+      const finish = optional('finish');
+      if (finish && finish !== 'stop' && finish !== 'length') {
+        throw new LessonParseError(`"${field}.finish" must be stop or length`);
+      }
+      return {
+        type: 'trace-response',
+        finish: finish as 'stop' | 'length' | undefined,
+        usage: record.usage === undefined || record.usage === null ? undefined : record.usage === true,
+        assistant: record.assistant === undefined || record.assistant === null ? undefined : record.assistant === true,
+      };
+    }
+    case 'trace-stream':
+      return {
+        type: 'trace-stream',
+        minChunks: optionalNumber(record.minChunks, `${field}.minChunks`),
+        done: record.done === undefined || record.done === null ? undefined : record.done === true,
+        assistant: record.assistant === undefined || record.assistant === null ? undefined : record.assistant === true,
+      };
+    case 'trace-turns':
+      return {
+        type: 'trace-turns',
+        min: Number(record.min ?? 1),
+        assistantReuse: record.assistantReuse === undefined || record.assistantReuse === null ? undefined : record.assistantReuse === true,
+      };
     case 'all':
       return toCheck(record.checks, `${field}.checks`);
     default:
       throw new LessonParseError(`unknown check type "${type}" in "${field}"`);
   }
 }
+
+const optionalNumber = (value: unknown, field: string): number | undefined => {
+  if (value === undefined || value === null) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new LessonParseError(`"${field}" must be a number`);
+  return number;
+};
 
 const regexSource = (value: unknown, field: string): string => {
   const source = asString(value, field);

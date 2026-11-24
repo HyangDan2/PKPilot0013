@@ -27,7 +27,13 @@ import type { CommandResult, OutLine, RuntimeId } from '../tracks/types';
 import { out } from '../tracks/types';
 import { evaluateCheck } from '../lessons/checks';
 import { lessonState, sourceHash } from './lesson-state';
-import { completionEnv, initialCompletion, type CompletionSettings } from './completion';
+import {
+  completionEnv,
+  configMatches,
+  initialCompletion,
+  runConfigSnapshot,
+  type CompletionSettings,
+} from './completion';
 import { t, type Lang } from '../i18n';
 import type { Lesson } from '../lessons/types';
 import {
@@ -47,6 +53,14 @@ export type { RunOutput, Session, TermEntry } from './session';
 export interface Toast {
   ids?: string[];
   text?: string;
+}
+
+/** The stream of the run on screen, as it arrives. Never persisted. */
+export interface LiveStream {
+  text: string;
+  chunks: number;
+  startedAt: number;
+  firstAt: number | null;
 }
 
 let entryId = 1;
@@ -75,8 +89,12 @@ export interface SandboxApi {
   completed: string[];
   running: boolean;
   pyProgress: PythonProgress;
-  /** true when the last run's source no longer matches the editor. */
+  /** true when the last run's source or connection settings changed since. */
   staleRun: boolean;
+  /** true only when the *settings* (not the code) changed after the run. */
+  staleConfig: boolean;
+  /** Live deltas of the running program; null when nothing streamed. */
+  stream: LiveStream | null;
   toast: Toast | null;
   /** Another tab saved a newer copy while this one has unsaved work. */
   syncConflict: SaveConflict | null;
@@ -120,8 +138,19 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const [completion, setCompletionState] = useState<CompletionSettings | null>(() => initialCompletion(lesson));
   const completionRef = useRef(completion);
   completionRef.current = completion;
+  /** Bumped by every settings edit; a run remembers the revision it used. */
+  const configRevision = useRef(0);
+  const [stream, setStream] = useState<LiveStream | null>(null);
+  const streamRef = useRef(stream);
+  streamRef.current = stream;
   const setCompletion = useCallback((patch: Partial<CompletionSettings>) => {
-    setCompletionState((previous) => (previous ? { ...previous, ...patch } : previous));
+    setCompletionState((previous) => {
+      if (!previous) return previous;
+      // A change of any field — even the same key in another mode — invalidates
+      // the measurement the previous run made.
+      configRevision.current += 1;
+      return { ...previous, ...patch };
+    });
   }, []);
 
   const engine = useRef<GitRepo | null>(boot.current.repo);
@@ -189,7 +218,12 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     (next: Session): Session => {
       let evaluated = next;
       if (!next.free && lesson.missions.length > 0) {
-        const state = lessonState(lesson, next);
+        const settings = completionRef.current;
+        const state = lessonState(
+          lesson,
+          next,
+          settings ? { settings, revision: configRevision.current } : null,
+        );
         const done = [...next.done];
         const fresh: string[] = [];
         for (const mission of lesson.missions) {
@@ -238,6 +272,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     generation.current += 1; // a run started from the old files is no longer wanted
     runningRef.current = false;
     setRunning(false);
+    setStream(null);
     engine.current = restored;
     const active = saved.active in files ? saved.active : Object.keys(files).sort()[0] ?? '';
     const next: Session = {
@@ -319,15 +354,39 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       const generationAtStart = generation.current;
       const hashAtStart = sourceHash(current.files);
       const settings = completionRef.current;
+      const revisionAtStart = configRevision.current;
       const runLimitMs = lesson.runTimeoutMs ?? RUN_TIMEOUT_MS;
       runningRef.current = true;
       setRunning(true);
+      setStream(null);
       const poll = window.setInterval(() => setPyProgress({ ...pythonStatus() }), 200);
       try {
         const run = await runPython(code, current.files, file, {
           timeoutMs: runLimitMs,
           loadTimeoutMs: LOAD_TIMEOUT_MS,
           env: settings ? completionEnv(settings) : undefined,
+          onDelta:
+            settings === null
+              ? undefined
+              : (delta) => {
+                  if (generationAtStart !== generation.current) return;
+                  setStream((previous) => {
+                    const base: LiveStream = previous ?? {
+                      text: '',
+                      chunks: 0,
+                      startedAt: Date.now(),
+                      firstAt: null,
+                    };
+                    return {
+                      ...base,
+                      // The worker sends the masked stream so far, so a key split
+                      // across two deltas never survives in the joined text.
+                      text: delta.cumulative ? delta.text : base.text + delta.text,
+                      chunks: base.chunks + 1,
+                      firstAt: base.firstAt ?? delta.at,
+                    };
+                  });
+                },
         });
         setPyProgress({ ...pythonStatus() });
         if (generationAtStart !== generation.current) {
@@ -373,8 +432,10 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
               timedOut: run.stoppedBy === 'timeout',
               phase: run.phase,
               loadMs: run.loadMs,
-              // Which source this output belongs to — a later edit makes it stale.
+              // Which source and settings this output belongs to — a later edit
+              // makes it stale.
               sourceHash: hashAtStart,
+              config: settings ? runConfigSnapshot(settings, revisionAtStart) : undefined,
               trace: run.trace,
             },
             lastStdout: run.stdout,
@@ -386,6 +447,9 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
         window.clearInterval(poll);
         runningRef.current = false;
         setRunning(false);
+        // The finished trace now carries the same answer; a live buffer belongs
+        // to a run that is still running.
+        setStream(null);
       }
     },
     [lesson.runTimeoutMs],
@@ -504,6 +568,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     generation.current += 1;
     runningRef.current = false;
     setRunning(false);
+    setStream(null);
     const current = sessionRef.current;
     const note: TermEntry = {
       id: nextId(),
@@ -581,6 +646,7 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
     if (runningRef.current) cancelPython();
     runningRef.current = false;
     setRunning(false);
+    setStream(null);
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -683,8 +749,14 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
   const runtime = lesson.runtime;
   const free = session.free || session.missionIndex >= lesson.missions.length;
   const activeMission = free ? null : lesson.missions[session.missionIndex] ?? null;
+  const staleConfig =
+    completion !== null &&
+    session.lastRun?.ok === true &&
+    !configMatches(session.lastRun.config, completion, configRevision.current);
   const staleRun =
-    runtime === 'python' && session.lastRun?.ok === true && session.lastRun.sourceHash !== sourceHash(session.files);
+    runtime === 'python' &&
+    session.lastRun?.ok === true &&
+    (session.lastRun.sourceHash !== sourceHash(session.files) || staleConfig);
 
   return useMemo(
     () => ({
@@ -696,6 +768,8 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       running,
       pyProgress,
       staleRun,
+      staleConfig,
+      stream,
       toast,
       syncConflict,
       resolveSync,
@@ -716,9 +790,9 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
       setCompletion,
     }),
     [
-      lesson, runtime, session, activeMission, running, pyProgress, staleRun, toast, syncConflict, resolveSync, submit,
-      runActive, stopRun, setFile, openFile, createFile, deleteFile, resetFiles, resetLesson, clearTerminal, complete,
-      selectMission, toggleHint, completion, setCompletion,
+      lesson, runtime, session, activeMission, running, pyProgress, staleRun, staleConfig, stream, toast, syncConflict,
+      resolveSync, submit, runActive, stopRun, setFile, openFile, createFile, deleteFile, resetFiles, resetLesson,
+      clearTerminal, complete, selectMission, toggleHint, completion, setCompletion,
     ],
   );
 }

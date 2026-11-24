@@ -21,7 +21,7 @@
  *  5. **A retryable loader.** A failed CDN download leaves no half-initialised
  *     state behind, so pressing Run again really does try again.
  */
-import { sanitizeTrace, type TraceEvent } from './trace';
+import { redactRunText, redactText, redactTrace, sanitizeTrace, type TraceEvent } from './trace';
 export type PythonStage = 'idle' | 'script' | 'runtime' | 'ready' | 'error';
 
 export interface PythonProgress {
@@ -47,6 +47,14 @@ export interface PythonRun {
   trace?: TraceEvent[];
 }
 
+/** One SSE piece as it arrives, for the panel that updates during the run. */
+export interface StreamDelta {
+  text: string;
+  at: number;
+  /** true when `text` is the whole masked stream so far, not just the new piece. */
+  cumulative?: boolean;
+}
+
 export interface PythonRunOptions {
   /** Limit for the learner's program. */
   timeoutMs?: number;
@@ -54,6 +62,8 @@ export interface PythonRunOptions {
   loadTimeoutMs?: number;
   /** Lesson settings for this run; the worker clears them when it ends. */
   env?: Record<string, string>;
+  /** Called for each streamed piece of the run that is still current. */
+  onDelta?: (delta: StreamDelta) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -86,6 +96,9 @@ interface PendingRun {
   phase: 'load' | 'run';
   timeoutMs: number;
   loadTimeoutMs: number;
+  /** The run's key, kept only so a second mask can be applied at the boundary. */
+  secret: string;
+  onDelta?: (delta: StreamDelta) => void;
 }
 
 let current: PendingRun | null = null;
@@ -162,10 +175,26 @@ function onWorkerMessage(event: unknown) {
     if (stage === 'ready' && current && current.phase === 'load') armPhase(current, 'run');
     return;
   }
+  if (data.type === 'delta') {
+    const requestId = Number(data.requestId);
+    // Late pieces of a stopped or superseded run never touch the UI.
+    if (!current || current.id !== requestId) return;
+    const text = redactText(String(data.text ?? ''), current.secret);
+    if (!text) return;
+    try {
+      // The worker masks the cumulative stream; masking it again is harmless and
+      // keeps the guarantee even if a future worker sends raw pieces.
+      current.onDelta?.({ text, at: Number(data.at ?? Date.now()), cumulative: data.cumulative === true });
+    } catch {
+      /* a panel must never break the run */
+    }
+    return;
+  }
   if (data.type !== 'done') return;
   const requestId = Number(data.requestId);
   // A result for a run that was stopped or superseded must not touch the UI.
   if (!current || current.id !== requestId) return;
+  const pending = current;
   const ok = data.ok === true;
   const phase = data.phase === 'load' ? 'load' : 'run';
   const loadMs = Number(data.loadMs ?? 0);
@@ -179,15 +208,23 @@ function onWorkerMessage(event: unknown) {
     setProgress('error', 0);
     disposeWorker();
   }
+  // The worker already masked these; doing it again from the run's own key
+  // keeps the guarantee even if a future worker forgets.
+  const safe = redactRunText(
+    {
+      stdout: String(data.stdout ?? ''),
+      stderr: String(data.stderr ?? ''),
+      error: ok ? undefined : String(data.error ?? 'error'),
+    },
+    pending.secret,
+  );
   settle({
     ok,
-    stdout: String(data.stdout ?? ''),
-    stderr: String(data.stderr ?? ''),
-    error: ok ? undefined : String(data.error ?? 'error'),
+    ...safe,
     ms: Math.max(0, total - loadMs),
     phase,
     loadMs,
-    trace: sanitizeTrace(data.trace),
+    trace: redactTrace(sanitizeTrace(data.trace), pending.secret),
   });
 }
 
@@ -252,6 +289,8 @@ export function runPython(
       phase: warm ? 'run' : 'load',
       timeoutMs,
       loadTimeoutMs,
+      secret: options.env?.LLM_API_KEY ?? '',
+      onDelta: options.onDelta,
     };
     current = pending;
     armPhase(pending, warm ? 'run' : 'load');

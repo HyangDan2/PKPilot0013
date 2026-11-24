@@ -241,6 +241,21 @@ describe('bundled lesson catalog', () => {
     expect(chat?.files['chatbot.py']).toContain('TODO');
   });
 
+  it('ships a direct-HTTP practice file beside the helper', () => {
+    const chat = lessonById('chat-completion');
+    const direct = chat?.files['http_direct.py'] ?? '';
+    // The learner writes endpoint, headers, payload, POST and parsing themselves.
+    for (const todo of ['TODO 1', 'TODO 2', 'TODO 3', 'TODO 4', 'TODO 5']) {
+      expect(direct).toContain(todo);
+    }
+    expect(direct).toContain('open_url');
+    expect(direct).toContain('urllib');
+    // The eight guided missions and the shell stay as they were.
+    expect(chat?.missions).toHaveLength(8);
+    expect(chat?.body).toContain('http_direct.py');
+    expect(chat?.panels).toEqual(['completion', 'output']);
+  });
+
   it('writes material with headings, a table and a code block', () => {
     for (const lesson of LESSONS) {
       expect(lesson.body).toMatch(/^##\s/m);

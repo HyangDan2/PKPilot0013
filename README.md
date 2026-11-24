@@ -51,13 +51,16 @@ missions:
 - Files are bundled at build time with `import.meta.glob('./lessons/*.md', { query: '?raw' })`, so
   the catalog is the folder listing.
 - `panels` decides which cards the right column assembles and in which order
-  (`output`, `git-graph`, `working-tree`). Unknown ids fail the build-time parse.
+  (`output`, `completion`, `git-graph`, `working-tree`). Unknown ids fail the build-time parse.
 - Mission checks are declarative and evaluated against the live sandbox state after every command:
   `ran`, `stdout-contains`, `stdout-matches`, `stdout-lines`, `file-contains`, `file-matches`,
-  `git-init`, `git-commits`, `git-branch`, `git-merge`, `git-remote`, `git-push`, or an `all`
-  list of those. `git-merge` counts a merge commit **and** a fast-forward — both put the other
-  branch's work on this one — and `git-push` holds while the pushed remote tip is still part of
-  the local branch.
+  `git-init`, `git-commits`, `git-branch`, `git-merge`, `git-remote`, `git-push`,
+  `trace-preview`, `trace-request`, `trace-response`, `trace-stream`, `trace-turns`, or an `all`
+  list of those. The `trace-*` checks read the run's request/response audit trail, so a chat
+  mission is judged by what was actually sent and received — identically in Mock and Live Mode —
+  rather than by looking for a string in the mock's answer. `git-merge` counts a merge commit
+  **and** a fast-forward — both put the other branch's work on this one — and `git-push` holds
+  while the pushed remote tip is still part of the local branch.
 - A broken lesson (unknown runtime/panel, missing entry file, duplicate mission id, bad regex) is
   rejected by `LessonParseError`, and the unit suite parses every bundled lesson.
 
@@ -182,7 +185,8 @@ A fourth pass (WO-18) finished the Git lesson's journey and fixed its merge dead
 ```bash
 npm install
 npm run dev        # http://localhost:5173/PKPilot0013/
-npm test           # Vitest — parser, panels, checks, Git engine, session, Python protocol
+npm test           # Vitest — parser, panels, checks, Git engine, session, Python protocol,
+                   # chat completion (real CPython + a local OpenAI-compatible mock server)
 npm run build      # tsc --noEmit && vite build
 npm run preview    # http://localhost:4173/PKPilot0013/
 npm run test:e2e   # Playwright: catalog → lesson → run, branch switch, reload, stop, 390/1440
@@ -193,12 +197,16 @@ real Pyodide in Node (see the file's header for the two commands); `--legacy` re
 pre-WO-14 lifecycle so the difference is visible.
 
 `PK13_PORT` moves the preview server when 4173 is taken; `PK13_BASE` points the suite at an already
-running server (the live site, for example). `--grep @smoke` runs the subset CI requires: those
-cases need no network, so a release cannot ship with a broken editor/repository contract.
+running server (the live site, for example). `--grep @smoke` runs the subset CI requires: no paid
+API key and nothing beyond the Pyodide CDN, so a release cannot ship with a broken
+editor/repository/completion contract.
 
-The Pyodide runtime is the only network request the app makes, and only when a Python lesson is
-first run (~10 MB from `cdn.jsdelivr.net`). If it cannot be reached, the output card says so and the
-rest of the workspace keeps working.
+The Pyodide runtime is the network request every Python lesson makes on first run (~10 MB from
+`cdn.jsdelivr.net`). **Live Mode** additionally sends one HTTP POST (and, for streaming, one SSE
+connection) from the browser to the Base URL the learner typed; Mock Mode makes no request at all
+and never receives the API key. The provider must allow browser CORS, including the preflight
+`OPTIONS` for `Authorization` and `Content-Type`. If Pyodide cannot be reached, the output card
+says so and the rest of the workspace keeps working.
 
 ## Structure
 
@@ -232,13 +240,11 @@ tools/                 brand asset + OG image generator
 
 ## Deployment
 
-`.github/workflows/deploy.yml` runs on every push to `main` (type check → unit tests → build) and
-publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
-
-The `@smoke` E2E step belongs in that workflow, but the assistant's GitHub token has no `workflows`
-permission, so the file cannot be written from a pull request. The ready-to-install version is kept
-at [`docs/ci-workflow.yml`](docs/ci-workflow.yml): copy it over `.github/workflows/deploy.yml` as the
-repository owner. Until then CI still type-checks, unit-tests and builds every push.
+`.github/workflows/deploy.yml` runs on every push to `main` (type check → build → unit tests →
+Playwright `@smoke`) and publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
+The `@smoke` set includes the Chat Completion cases — a Mock Mode run, streamed chunks,
+stale-after-settings-change and a local CORS-allowed/denied provider — so a release cannot ship
+with a broken completion panel. They use no paid API key and no network beyond the Pyodide CDN.
 
 ## License
 
