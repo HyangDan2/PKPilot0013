@@ -197,8 +197,9 @@ real Pyodide in Node (see the file's header for the two commands); `--legacy` re
 pre-WO-14 lifecycle so the difference is visible.
 
 `PK13_PORT` moves the preview server when 4173 is taken; `PK13_BASE` points the suite at an already
-running server (the live site, for example). `--grep @smoke` runs the subset CI requires: those
-cases need no network, so a release cannot ship with a broken editor/repository contract.
+running server (the live site, for example). `--grep @smoke` runs the subset CI requires: no paid
+API key and nothing beyond the Pyodide CDN, so a release cannot ship with a broken
+editor/repository/completion contract.
 
 The Pyodide runtime is the network request every Python lesson makes on first run (~10 MB from
 `cdn.jsdelivr.net`). **Live Mode** additionally sends one HTTP POST (and, for streaming, one SSE
@@ -239,13 +240,11 @@ tools/                 brand asset + OG image generator
 
 ## Deployment
 
-`.github/workflows/deploy.yml` runs on every push to `main` (type check → unit tests → build) and
-publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
-
-The `@smoke` E2E step belongs in that workflow, but the assistant's GitHub token has no `workflows`
-permission, so the file cannot be written from a pull request. The ready-to-install version is kept
-at [`docs/ci-workflow.yml`](docs/ci-workflow.yml): copy it over `.github/workflows/deploy.yml` as the
-repository owner. Until then CI still type-checks, unit-tests and builds every push.
+`.github/workflows/deploy.yml` runs on every push to `main` (type check → build → unit tests →
+Playwright `@smoke`) and publishes `dist/` with GitHub Pages. No `gh-pages` branch is used.
+The `@smoke` set includes the Chat Completion cases — a Mock Mode run, streamed chunks,
+stale-after-settings-change and a local CORS-allowed/denied provider — so a release cannot ship
+with a broken completion panel. They use no paid API key and no network beyond the Pyodide CDN.
 
 ## License
 

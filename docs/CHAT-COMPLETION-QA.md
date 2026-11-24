@@ -20,7 +20,7 @@
 | WO-25 Live integration QA | PASS | local OpenAI-compatible mock server in Vitest (status codes, malformed bodies, split SSE/Korean, truncated stream, key reflection) + browser CORS allow/deny in Playwright |
 | WO-26 Mock engine consistency | PASS | one `estimate_tokens` used for both usage and `max_tokens`; docs state the tokenizer differs and temperature does not change mock sampling; provider-parameter hint on 400/422 |
 | WO-27 Lesson improvement | PASS | 8 steps kept; raw HTTP POST example, preview-vs-sent, glossary, streaming comparison exercise, HTTP error/timeout table, security limitation, examples aligned with checks |
-| WO-28 Docs & CI | PASS (CI patch by owner) | README panel/check/network updates; `docs/ci-workflow.yml` carries the `@smoke` E2E step; the App token cannot write under `.github/workflows/` |
+| WO-28 Docs & CI | PASS | README panel/check/network updates; `.github/workflows/deploy.yml` now installs Chromium and runs `npx playwright test --grep @smoke`, which includes the chat Mock/stream/stale and CORS cases |
 
 ## 2. Commands run
 
@@ -82,6 +82,6 @@ The Playwright suite also writes per-run captures under `.playwright-artifacts/`
    answer is rule-based. This is documented in the lesson.
 6. **Lesson body is Korean**, matching the other lessons; mission titles/goals/hints and the UI are
    bilingual (KO/EN).
-7. **CI workflow file is a patch.** The assistant token cannot write `.github/workflows/`; the
-   owner must copy `docs/ci-workflow.yml` to `.github/workflows/deploy.yml` to run the chat
-   `@smoke` E2E in GitHub Actions.
+7. **CI consumes the Pyodide CDN.** The `@smoke` chat case loads the interpreter (~10 MB) from
+   `cdn.jsdelivr.net`; a runner without outbound HTTPS would fail that step. It needs no paid API
+   key, and the Live Mode cases use a loopback server.
