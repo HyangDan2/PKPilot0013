@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lessonById } from '../src/lessons';
 import type { Lesson } from '../src/lessons/types';
+import { StreamRedactor } from '../src/tracks/python/trace';
 
 const lesson = lessonById('chat-completion') as Lesson;
 const KEY = 'sk-live-SECRET-987654';
@@ -62,6 +63,10 @@ const sse = (content: string, options: { done?: boolean; finish?: string | null;
 let server: Server;
 let base = '';
 
+/** Connections the mock provider is still holding open, and the ones it saw close. */
+const held: ServerResponse[] = [];
+const closed = new Set<string>();
+
 /** Routes are chosen by the first path segment, so each scenario has its own URL. */
 const route = (path: string): string => path.split('/')[1] ?? '';
 
@@ -79,6 +84,11 @@ beforeAll(async () => {
     }
     const send = (status: number, body: unknown, type = 'application/json') => {
       response.writeHead(status, { 'Content-Type': type }).end(typeof body === 'string' ? body : JSON.stringify(body));
+    };
+    const holdOpen = () => {
+      // Accept the request and stay silent; note when the client gives up.
+      held.push(response);
+      response.on('close', () => closed.add(name));
     };
     const status = /^status-(\d+)$/.exec(name);
     if (status) {
@@ -104,6 +114,33 @@ beforeAll(async () => {
       case 'echo-key-error':
         response.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: `bad key ${KEY}` } }));
         return;
+      case 'parameter-error':
+        send(400, { error: { message: 'Unsupported parameter: temperature is not allowed for this model' } });
+        return;
+      case 'silent':
+        holdOpen();
+        return;
+      case 'slow-body':
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.write('{"choices": [');
+        holdOpen();
+        return;
+      case 'stream-stall':
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '첫 조각' } }] })}\r\n\r\n`);
+        holdOpen();
+        return;
+      case 'split-key-stream': {
+        const pieces = ['your key is ', KEY.slice(0, 9), KEY.slice(9), ' ok'];
+        const lines = pieces.map(
+          (piece) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}`,
+        );
+        lines.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}`);
+        lines.push('data: [DONE]');
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end(lines.join('\r\n\r\n') + '\r\n\r\n');
+        return;
+      }
       case 'stream': {
         const { body } = sse('안녕하세요 스트림입니다 반갑습니다');
         const bytes = Buffer.from(body, 'utf8');
@@ -143,6 +180,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const response of held) response.destroy();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -197,6 +235,16 @@ try:
 except Exception as error:
     print("ERR", type(error).__name__, str(error))
 `;
+
+/** Waits until the client closed the connection the mock provider was holding. */
+const waitForClose = async (name: string, timeoutMs = 5_000): Promise<boolean> => {
+  const started = Date.now();
+  while (!closed.has(name)) {
+    if (Date.now() - started > timeoutMs) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+};
 
 const streamCall = `
 from llm_client import stream_chat
@@ -294,5 +342,81 @@ describe.skipIf(!hasPython)('Live Mode against a local OpenAI-compatible server'
     const without = await live('ok', chatCall, { LLM_API_KEY: '' });
     expect(without.trace).not.toContain('Authorization');
     expect(without.stdout).toContain('OK');
+  });
+
+  it('times out a silent provider and cancels the connection', async () => {
+    const started = Date.now();
+    const { stdout, trace } = await live('silent', chatCall, { LLM_REQUEST_TIMEOUT: '0.4' });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(stdout).toContain('ERR RuntimeError');
+    expect(stdout).toContain('0.4초 안에 끝나지 않았습니다');
+    expect(trace).toContain('"message": "요청 시간 초과"');
+    expect(trace).toContain('"status": 0');
+    // The client gave up and closed the socket instead of leaving it hanging.
+    expect(await waitForClose('silent')).toBe(true);
+  });
+
+  it('bounds the body read when the response never finishes', async () => {
+    const started = Date.now();
+    const { stdout } = await live('slow-body', chatCall, { LLM_REQUEST_TIMEOUT: '0.4' });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(stdout).toContain('0.4초 안에 끝나지 않았습니다');
+    expect(await waitForClose('slow-body')).toBe(true);
+  });
+
+  it('times out a stream that stalls after its first chunk', async () => {
+    const started = Date.now();
+    const { stdout, trace } = await live('stream-stall', streamCall, { LLM_STREAM_TIMEOUT: '0.4' });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(stdout).toContain('스트리밍이 0.4초 안에 끝나지 않았습니다');
+    expect(trace).toContain('"message": "스트리밍 시간 초과"');
+    expect(trace).not.toContain('"done": true');
+    expect(await waitForClose('stream-stall')).toBe(true);
+  });
+
+  it('times out a stream whose headers never arrive', async () => {
+    const started = Date.now();
+    const { stdout } = await live('silent', streamCall, { LLM_STREAM_TIMEOUT: '0.4' });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(stdout).toContain('스트리밍이 0.4초 안에 끝나지 않았습니다');
+  });
+
+  it('masks a key that a provider splits across stream deltas', async () => {
+    const { stdout, trace } = await live('split-key-stream', streamCall);
+    // The program's own stdout is masked by the worker in the app.
+    expect(stdout).toContain('OK your key is ' + KEY);
+    const events = trace
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { kind: string; data: Record<string, unknown> });
+    const response = events.find((event) => event.kind === 'response');
+    expect(JSON.stringify(response)).not.toContain(KEY);
+    expect(events.find((event) => event.kind === 'stream')?.data.done).toBe(true);
+    // The panel shows the join of the chunk texts, masked as one string.
+    const pieces = events
+      .filter((event) => event.kind === 'chunk')
+      .map((event) => {
+        const choices = event.data.choices as { delta?: { content?: string } }[] | undefined;
+        return choices?.[0]?.delta?.content ?? '';
+      });
+    expect(pieces.join('')).toContain(KEY);
+    expect(StreamRedactor.join(pieces, KEY)).not.toContain(KEY);
+    expect(StreamRedactor.join(pieces, KEY)).toContain('sk-l••••7654');
+  });
+
+  it('explains an unsupported provider parameter instead of a bare 400', async () => {
+    const { stdout } = await live('parameter-error', chatCall);
+    expect(stdout).toContain('HTTP 400');
+    expect(stdout).toContain('이 파라미터를 지원하지 않을 수 있습니다');
+  });
+
+  it('refuses Live Mode without a model or with a malformed base URL', async () => {
+    const noModel = await live('ok', chatCall, { LLM_MODEL: '' });
+    expect(noModel.stdout).toContain('Live Mode 에는 Model ID 가 필요합니다');
+
+    const badUrl = await live('ok', chatCall, { LLM_BASE_URL: 'provider.example/v1' });
+    expect(badUrl.stdout).toContain('Base URL 형식이 올바르지 않습니다');
+    const noScheme = await live('ok', chatCall, { LLM_BASE_URL: 'ftp://provider.example/v1' });
+    expect(noScheme.stdout).toContain('Base URL 형식이 올바르지 않습니다');
   });
 });

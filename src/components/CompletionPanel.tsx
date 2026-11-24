@@ -14,7 +14,7 @@ import { useMemo, useState } from 'react';
 import { t, type Lang } from '../i18n';
 import type { CompletionSettings } from '../state/completion';
 import type { LiveStream, RunOutput } from '../state/useSandbox';
-import { redactTrace, type TraceEvent } from '../tracks/python/trace';
+import { redactText, redactTrace, type TraceEvent } from '../tracks/python/trace';
 
 type Tab = 'request' | 'response' | 'assistant' | 'usage' | 'stream';
 
@@ -121,6 +121,9 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale,
 
   const liveText = stream?.text ?? '';
   const liveChunks = stream?.chunks ?? 0;
+  // Each chunk event was masked on its own; a key split across two events only
+  // appears once they are joined, so the joined text is masked once more.
+  const traceStream = redactText(traceChunks.join(''), settings?.apiKey ?? '');
   const chunkCount = summary && typeof summary.chunks === 'number' ? Math.max(summary.chunks, traceChunks.length) : traceChunks.length || liveChunks;
   const ttft =
     stream?.firstAt != null
@@ -323,7 +326,7 @@ export function CompletionPanel({ lang, settings, onChange, run, running, stale,
                 </div>
               </div>
               <pre className="out-block assistant" data-testid="completion-stream">
-                {liveText || traceChunks.join('')}
+                {liveText || traceStream}
               </pre>
             </>
           ) : (

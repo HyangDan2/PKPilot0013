@@ -51,6 +51,8 @@ export interface PythonRun {
 export interface StreamDelta {
   text: string;
   at: number;
+  /** true when `text` is the whole masked stream so far, not just the new piece. */
+  cumulative?: boolean;
 }
 
 export interface PythonRunOptions {
@@ -180,7 +182,9 @@ function onWorkerMessage(event: unknown) {
     const text = redactText(String(data.text ?? ''), current.secret);
     if (!text) return;
     try {
-      current.onDelta?.({ text, at: Number(data.at ?? Date.now()) });
+      // The worker masks the cumulative stream; masking it again is harmless and
+      // keeps the guarantee even if a future worker sends raw pieces.
+      current.onDelta?.({ text, at: Number(data.at ?? Date.now()), cumulative: data.cumulative === true });
     } catch {
       /* a panel must never break the run */
     }

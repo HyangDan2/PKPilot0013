@@ -117,7 +117,7 @@ describe('Python runtime protocol', () => {
     const id = worker.lastRequestId;
 
     worker.send({ type: 'delta', requestId: id, text: '안녕 Bearer ' + secret, at: 42 });
-    expect(deltas).toEqual([{ text: '안녕 Bearer sk-t••••3456', at: 42 }]);
+    expect(deltas).toMatchObject([{ text: '안녕 Bearer sk-t••••3456', at: 42, cumulative: false }]);
 
     // A late piece from a run the learner already left must not reach the panel.
     worker.send({ type: 'delta', requestId: id + 99, text: 'old', at: 1 });
@@ -129,6 +129,20 @@ describe('Python runtime protocol', () => {
 
     worker.send({ type: 'delta', requestId: id, text: 'late', at: 2 });
     expect(deltas).toHaveLength(1);
+  });
+
+  it('marks cumulative deltas so the page can replace instead of append', async () => {
+    const created = useFakeWorkers();
+    const deltas: { text: string; cumulative?: boolean }[] = [];
+    const pending = runPython('print(1)', {}, 'main.py', {
+      env: { LLM_API_KEY: 'sk-test-SECRET-123456' },
+      onDelta: (delta) => deltas.push(delta),
+    });
+    const worker = created[0];
+    worker.send({ type: 'delta', requestId: worker.lastRequestId, text: '안녕 sk-t••••3456', cumulative: true, at: 7 });
+    expect(deltas).toEqual([{ text: '안녕 sk-t••••3456', at: 7, cumulative: true }]);
+    worker.send({ type: 'done', requestId: worker.lastRequestId, ok: true, stdout: '', stderr: '', ms: 1 });
+    await pending;
   });
 
   it('refuses a second program while one is running instead of interleaving', async () => {

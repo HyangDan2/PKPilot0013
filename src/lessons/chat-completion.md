@@ -45,6 +45,7 @@ files:
     import socket
     import time
     import urllib.error
+    import urllib.parse
     import urllib.request
 
 
@@ -53,14 +54,24 @@ files:
         return value if value != "" else fallback
 
 
+    def _seconds(name, fallback):
+        """Timeout in seconds; the environment override exists for short tests."""
+        try:
+            return max(0.1, float(os.environ.get(f"LLM_{name}", fallback)))
+        except ValueError:
+            return fallback
+
+
     MODE = _setting("MODE", "mock")
     BASE_URL = _setting("BASE_URL")
     API_KEY = _setting("API_KEY")
-    MODEL = _setting("MODEL", "classroom-mock-1")
+    # The mock name is a Mock Mode fallback only: Live Mode with an empty Model
+    # ID must say so instead of silently calling the provider with a mock name.
+    MODEL = _setting("MODEL") or ("classroom-mock-1" if MODE == "mock" else "")
     DEFAULT_SYSTEM = _setting("SYSTEM")
     DEFAULT_USER = _setting("USER", "안녕! 너는 누구야?")
-    REQUEST_TIMEOUT = 45
-    STREAM_TIMEOUT = 40
+    REQUEST_TIMEOUT = _seconds("REQUEST_TIMEOUT", 45)
+    STREAM_TIMEOUT = _seconds("STREAM_TIMEOUT", 40)
 
     TRACE_MAX_EVENTS = 400
     TRACE_MAX_BYTES = 512 * 1024
@@ -176,7 +187,8 @@ files:
         if isinstance(value, list):
             return [_mask_data(item) for item in value]
         if isinstance(value, dict):
-            return {key: _mask_data(item) for key, item in value.items()}
+            # A provider may echo the key as a JSON key, not only as a value.
+            return {_mask_text(key): _mask_data(item) for key, item in value.items()}
         return value
 
 
@@ -220,14 +232,19 @@ files:
         finish_reason = "stop"
         if max_tokens is not None:
             words = content.split()
+            suffix = " …"
             kept = []
-            for word in words:
+            for index, word in enumerate(words):
                 candidate = " ".join(kept + [word])
+                # A cut answer ends with "…", and that marker counts toward the
+                # same token budget: never return more than max_tokens.
+                if index < len(words) - 1:
+                    candidate += suffix
                 if estimate_tokens(candidate) > max_tokens:
                     break
                 kept.append(word)
             if len(kept) < len(words):
-                content = " ".join(kept) + " …"
+                content = " ".join(kept) + suffix
                 finish_reason = "length"
             else:
                 content = " ".join(kept)
@@ -259,11 +276,35 @@ files:
         }
 
 
+    class _TimeoutError(RuntimeError):
+        """The request or stream deadline expired; transports already aborted."""
+
+
+    def _request_timeout():
+        return _TimeoutError(
+            f"요청이 {REQUEST_TIMEOUT:g}초 안에 끝나지 않았습니다. "
+            "네트워크와 Base URL 을 확인하세요."
+        )
+
+
+    def _stream_timeout():
+        return _TimeoutError(
+            f"스트리밍이 {STREAM_TIMEOUT:g}초 안에 끝나지 않았습니다. "
+            "Stop 을 누르거나 Base URL 을 확인하세요."
+        )
+
+
     def _require_live_settings():
         if not BASE_URL:
             raise RuntimeError(
                 "Live Mode 에는 Base URL 이 필요합니다. "
                 "오른쪽 Chat Completion 패널에서 입력하세요."
+            )
+        parsed = urllib.parse.urlsplit(BASE_URL.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise RuntimeError(
+                "Base URL 형식이 올바르지 않습니다. "
+                "https://provider.example/v1 처럼 http(s):// 로 시작하는 주소를 입력하세요."
             )
         if not MODEL:
             raise RuntimeError(
@@ -277,6 +318,15 @@ files:
             "네트워크 요청이 실패했습니다. 브라우저에서 직접 호출하므로 "
             "제공자가 CORS 를 허용해야 합니다. Base URL 과 HTTPS 주소를 확인하세요. "
             f"({type(error).__name__}: {_mask_text(error)})"
+        )
+
+
+    def _is_timeout(error):
+        """urllib 은 소켓 시간 초과를 URLError 로 감싸므로 그 안쪽까지 봅니다."""
+        if isinstance(error, (socket.timeout, TimeoutError)):
+            return True
+        return isinstance(error, urllib.error.URLError) and isinstance(
+            error.reason, (socket.timeout, TimeoutError)
         )
 
 
@@ -298,19 +348,87 @@ files:
             return False
 
 
-    async def _post_json(request):
-        """Live Mode 의 일반(비스트리밍) 요청. 브라우저와 CPython 모두 지원."""
-        if _has_pyodide():
-            from pyodide.http import pyfetch
+    async def _await_before(deadline, abort, error, awaitable):
+        """Waits for a browser promise, but never past `deadline`.
 
-            response = await pyfetch(
-                request["url"],
-                method=request["method"],
-                headers=request["headers"],
-                body=json.dumps(request["body"]),
+        fetch 와 Response.text() 에는 자체 timeout 이 없습니다. 서버가 연결을
+        받아 놓고 아무것도 보내지 않으면 영원히 기다리게 되므로, 마감 시각이
+        지나면 AbortController 로 실제 HTTP 요청 자체를 취소합니다.
+        """
+        import asyncio
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            abort()
+            raise error()
+        try:
+            return await asyncio.wait_for(awaitable, remaining)
+        except asyncio.TimeoutError:
+            abort()
+            raise error() from None
+
+
+    async def _thread_before(deadline, abort, error, function, *args):
+        """CPython 쪽 blocking 호출용. 같은 마감 시각 규칙을 지킵니다.
+
+        스레드는 강제로 멈출 수 없으므로 abort() 가 소켓을 닫아 기다리던
+        호출을 풀어 줍니다. 늦게 끝난 결과는 아무도 읽지 않습니다.
+        """
+        import asyncio
+
+        remaining = max(0.0, deadline - time.monotonic())
+        task = asyncio.ensure_future(asyncio.to_thread(function, *args))
+        done, _ = await asyncio.wait({task}, timeout=remaining)
+        if task in done:
+            return task.result()
+        abort()
+        # The abandoned call may still finish; retrieve it so asyncio stays quiet.
+        task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+        raise error()
+
+
+    async def _post_json(request):
+        """Live Mode 의 일반(비스트리밍) 요청. 브라우저와 CPython 모두 지원.
+
+        마감 시각은 연결을 시작한 순간부터 셉니다. 성공·오류·시간 초과 어느
+        쪽으로 끝나도 연결은 finally 에서 정리됩니다.
+        """
+        if _has_pyodide():
+            from js import JSON as JsJSON
+            from js import AbortController, fetch
+
+            controller = AbortController.new()
+            deadline = time.monotonic() + REQUEST_TIMEOUT
+            init = JsJSON.parse(
+                json.dumps(
+                    {
+                        "method": request["method"],
+                        "headers": request["headers"],
+                        "body": json.dumps(request["body"]),
+                    }
+                )
             )
-            text = await response.string()
-            return response.status, text
+            init.signal = controller.signal
+            try:
+                response = await _await_before(
+                    deadline, controller.abort, _request_timeout, fetch(request["url"], init)
+                )
+                text = await _await_before(
+                    deadline, controller.abort, _request_timeout, response.text()
+                )
+                return response.status, text
+            finally:
+                controller.abort()
+
+        holder = {}
+
+        def abort():
+            response = holder.get("response")
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
         def blocking():
             data = json.dumps(request["body"]).encode("utf-8")
@@ -318,14 +436,19 @@ files:
                 request["url"], data=data, headers=request["headers"], method="POST"
             )
             try:
-                with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-                    return response.status, response.read().decode("utf-8", "replace")
+                response = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
             except urllib.error.HTTPError as error:
-                return error.code, error.read().decode("utf-8", "replace")
+                with error:
+                    return error.code, error.read().decode("utf-8", "replace")
+            holder["response"] = response
+            try:
+                return response.status, response.read().decode("utf-8", "replace")
+            finally:
+                response.close()
+                holder.pop("response", None)
 
-        import asyncio
-
-        return await asyncio.to_thread(blocking)
+        deadline = time.monotonic() + REQUEST_TIMEOUT
+        return await _thread_before(deadline, abort, _request_timeout, blocking)
 
 
     def _http_error_message(text, status):
@@ -353,25 +476,16 @@ files:
             return response
 
         _require_live_settings()
-        import asyncio
 
         try:
-            status, text = await asyncio.wait_for(
-                _post_json(request), timeout=REQUEST_TIMEOUT
-            )
-        except asyncio.TimeoutError:
+            status, text = await _post_json(request)
+        except _TimeoutError as error:
             _trace("error", {"status": 0, "message": "요청 시간 초과"})
-            raise RuntimeError(
-                f"요청이 {REQUEST_TIMEOUT}초 안에 끝나지 않았습니다. "
-                "네트워크와 Base URL 을 확인하세요."
-            ) from None
-        except socket.timeout:
-            _trace("error", {"status": 0, "message": "요청 시간 초과"})
-            raise RuntimeError(
-                f"요청이 {REQUEST_TIMEOUT}초 안에 끝나지 않았습니다. "
-                "네트워크와 Base URL 을 확인하세요."
-            ) from None
+            raise RuntimeError(str(error)) from None
         except Exception as error:
+            if _is_timeout(error):
+                _trace("error", {"status": 0, "message": "요청 시간 초과"})
+                raise _request_timeout() from None
             _trace("error", {"status": 0, "message": _mask_text(error)})
             raise RuntimeError(_network_error(error)) from error
 
@@ -528,21 +642,30 @@ files:
 
     async def _mock_stream(messages, max_tokens):
         response = _mock_response(messages, max_tokens)
-        content = response["choices"][0]["message"]["content"]
-        words = content.split(" ")
+        choice = response["choices"][0]
+        content = choice["message"]["content"]
         state = _StreamState()
         started = time.monotonic()
         import asyncio
 
+        words = content.split(" ")
         for index, word in enumerate(words):
             piece = word + (" " if index < len(words) - 1 else "")
+            if not piece:
+                continue
             event = {"choices": [{"index": 0, "delta": {"content": piece}}]}
             _apply_event(event, state, started)
             await asyncio.sleep(0.01)
 
-        data = _finish_stream(state, started)
-        data["chunks"] = state.chunks
-        return data
+        # 같은 응답의 finish_reason·usage 를 마지막 조각으로도 보냅니다.
+        # 스트리밍과 일반 응답이 서로 다른 이야기를 하지 않게 하기 위해서입니다.
+        _apply_event(
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+            state,
+            started,
+        )
+        _apply_event({"choices": [], "usage": response["usage"]}, state, started)
+        return _finish_stream(state, started)
 
 
     def _stream_lines(buffer, final, state, started):
@@ -585,33 +708,31 @@ files:
             )
         )
         init.signal = controller.signal
-        try:
-            response = await fetch(request["url"], init)
-        except Exception as error:
-            raise RuntimeError(_network_error(error)) from error
-
-        if not response.ok:
-            text = await response.text()
-            message = _http_error_message(text, response.status)
-            _trace("error", {"status": response.status, "message": message or text[:300]})
-            controller.abort()
-            raise RuntimeError(f"HTTP {response.status}: {message or _mask_text(text)[:300]}")
-
-        reader = response.body.getReader()
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        state = _StreamState()
+        reader = None
         started = time.monotonic()
-        buffer = ""
+        # 연결을 시작한 순간부터 스트리밍 전체의 마감 시각을 셉니다.
         deadline = started + STREAM_TIMEOUT
+        state = _StreamState()
+        buffer = ""
 
         try:
+            response = await _await_before(
+                deadline, controller.abort, _stream_timeout, fetch(request["url"], init)
+            )
+            if not response.ok:
+                text = await _await_before(
+                    deadline, controller.abort, _stream_timeout, response.text()
+                )
+                message = _http_error_message(text, response.status)
+                _trace("error", {"status": response.status, "message": message or text[:300]})
+                raise RuntimeError(f"HTTP {response.status}: {message or _mask_text(text)[:300]}")
+
+            reader = response.body.getReader()
+            decoder = codecs.getincrementaldecoder("utf-8")()
             while not state.done_marker:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(
-                        f"스트리밍이 {STREAM_TIMEOUT}초 안에 끝나지 않았습니다. "
-                        "Stop 을 누르거나 Base URL 을 확인하세요."
-                    )
-                result = await reader.read()
+                result = await _await_before(
+                    deadline, controller.abort, _stream_timeout, reader.read()
+                )
                 if result.done:
                     buffer += decoder.decode(b"", final=True)
                     buffer = _stream_lines(buffer, True, state, started)
@@ -619,17 +740,29 @@ files:
                 buffer += _decode_chunk(result.value, decoder)
                 buffer = _stream_lines(buffer, False, state, started)
             _ensure_complete(state)
-        except Exception:
-            # Close the real HTTP connection instead of leaving it hanging.
+        finally:
+            # 성공·[DONE]·오류·시간 초과·Stop 어느 쪽이든 reader 와 연결을 닫습니다.
+            try:
+                if reader is not None:
+                    reader.cancel()
+            except Exception:
+                pass
             controller.abort()
-            raise
 
         return _finish_stream(state, started)
 
 
     async def _cpython_live_stream(request):
         """CPython(테스트·명령줄)에서 같은 SSE 코드를 쓰기 위한 전송 계층."""
-        import asyncio
+        holder = {}
+
+        def abort():
+            response = holder.get("response")
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
         def blocking():
             data = json.dumps(request["body"]).encode("utf-8")
@@ -637,26 +770,30 @@ files:
                 request["url"], data=data, headers=request["headers"], method="POST"
             )
             try:
-                return urllib.request.urlopen(req, timeout=STREAM_TIMEOUT)
+                response = urllib.request.urlopen(req, timeout=STREAM_TIMEOUT)
             except urllib.error.HTTPError as error:
                 body = error.read().decode("utf-8", "replace")
-                raise RuntimeError(f"HTTP {error.code}: {_http_error_message(body, error.code) or _mask_text(body)[:300]}")
+                error.close()
+                message = _http_error_message(body, error.code)
+                _trace("error", {"status": error.code, "message": message or body[:300]})
+                raise RuntimeError(
+                    f"HTTP {error.code}: {message or _mask_text(body)[:300]}"
+                ) from None
+            holder["response"] = response
+            return response
 
-        response = await asyncio.to_thread(blocking)
+        started = time.monotonic()
+        deadline = started + STREAM_TIMEOUT
+        response = await _thread_before(deadline, abort, _stream_timeout, blocking)
         decoder = codecs.getincrementaldecoder("utf-8")()
         state = _StreamState()
-        started = time.monotonic()
         buffer = ""
-        deadline = started + STREAM_TIMEOUT
 
         try:
             while not state.done_marker:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(
-                        f"스트리밍이 {STREAM_TIMEOUT}초 안에 끝나지 않았습니다. "
-                        "Stop 을 누르거나 Base URL 을 확인하세요."
-                    )
-                piece = await asyncio.to_thread(response.read, 256)
+                piece = await _thread_before(
+                    deadline, abort, _stream_timeout, response.read, 256
+                )
                 if not piece:
                     buffer += decoder.decode(b"", final=True)
                     buffer = _stream_lines(buffer, True, state, started)
@@ -666,6 +803,7 @@ files:
             _ensure_complete(state)
         finally:
             response.close()
+            holder.pop("response", None)
 
         return _finish_stream(state, started)
 
@@ -679,9 +817,18 @@ files:
         if MODE == "mock":
             return await _mock_stream(messages, max_tokens)
         _require_live_settings()
-        if _has_pyodide():
-            return await _browser_live_stream(request)
-        return await _cpython_live_stream(request)
+        try:
+            if _has_pyodide():
+                return await _browser_live_stream(request)
+            return await _cpython_live_stream(request)
+        except _TimeoutError as error:
+            _trace("error", {"status": 0, "message": "스트리밍 시간 초과"})
+            raise RuntimeError(str(error)) from None
+        except Exception as error:
+            if not _is_timeout(error):
+                raise
+            _trace("error", {"status": 0, "message": "스트리밍 시간 초과"})
+            raise _stream_timeout() from None
   main.py: |
     """Mission 1 — 연결 설정 확인하기.
 
@@ -697,6 +844,80 @@ files:
     print("api key:", llm_client.mask_key())
     print("system:", llm_client.DEFAULT_SYSTEM or "(없음)")
     print("user:", llm_client.DEFAULT_USER)
+
+  http_direct.py: |
+    """심화 실습 — 헬퍼 없이 HTTP POST 한 번 직접 작성하기.
+
+    llm_client.py 는 초보자를 위한 헬퍼입니다. 여기서는 같은 chat completion
+    호출을 Endpoint, Header, JSON Payload, HTTP POST, Response Parsing 다섯
+    단계로 나누어 직접 작성합니다.
+
+    이 파일은 일부러 동기 함수만 씁니다. 수업용 worker 에서는 pyodide.http 의
+    open_url 로, 터미널 CPython 에서는 urllib.request 로 같은 코드를 실행할
+    수 있습니다. 복잡한 SSE·예외 처리는 llm_client.py(심화 내용)에 있습니다.
+
+    실행: 터미널에 python http_direct.py
+    힌트: 본문 '심화 실습' 절에 완성 예제가 있습니다.
+    """
+
+    import json
+    import os
+
+    MODE = os.environ.get("LLM_MODE", "mock")
+    BASE_URL = os.environ.get("LLM_BASE_URL", "")
+    API_KEY = os.environ.get("LLM_API_KEY", "")
+    MODEL = os.environ.get("LLM_MODEL", "") or "classroom-mock-1"
+
+
+    def request_parts(messages):
+        """TODO 1~3 — 요청의 주소, 헤더, JSON 본문을 만듭니다."""
+        # TODO 1 — Endpoint: BASE_URL 뒤에 /chat/completions 를 붙이세요.
+        #          Mock Mode 의 주소는 mock://classroom 입니다.
+        # TODO 2 — Header: Content-Type 은 application/json,
+        #          API_KEY 가 있을 때만 Authorization: Bearer <key> 를 넣으세요.
+        # TODO 3 — JSON Payload: model 과 messages 를 담은 dict 를 만드세요.
+        #          마지막 줄에서 return endpoint, headers, body
+        raise NotImplementedError("TODO 1~3: endpoint, headers, body 를 만드세요.")
+
+
+    def post(endpoint, headers, body):
+        """TODO 4 — HTTP POST 를 보내고 (상태 코드, 본문 문자열) 을 돌려줍니다."""
+        #   · 브라우저: from pyodide.http import open_url
+        #       response = open_url(endpoint, method="POST", headers=headers,
+        #                           data=json.dumps(body).encode("utf-8"))
+        #       return response.status, response.read().decode("utf-8")
+        #   · 터미널: urllib.request.Request(...) + urllib.request.urlopen(...)
+        raise NotImplementedError("TODO 4: HTTP POST 를 작성하세요.")
+
+
+    def parse_response(text):
+        """TODO 5 — JSON 을 읽고 choices[0].message.content 를 꺼냅니다."""
+        raise NotImplementedError("TODO 5: 응답 파싱을 작성하세요.")
+
+
+    def _mock_response():
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "직접 구현 연습 응답"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+        }
+
+
+    def main():
+        messages = [{"role": "user", "content": "안녕! 너는 누구야?"}]
+        endpoint, headers, body = request_parts(messages)
+        print("endpoint:", endpoint)
+        print("headers:", json.dumps(headers, ensure_ascii=False))
+        print("body:", json.dumps(body, ensure_ascii=False))
+        if MODE == "mock":
+            reply = _mock_response()
+        else:
+            status, text = post(endpoint, headers, body)
+            print("status:", status)
+            reply = parse_response(text)
+        print("[direct]", reply["choices"][0]["message"]["content"])
+
+
+    main()
 
   chatbot.py: |
     """Mission 8 — 간단한 챗봇 (자유 실습).
@@ -779,7 +1000,6 @@ missions:
         path: main.py
         value: 'choices.{0,4}\[0\]'
       - type: trace-response
-        finish: stop
         usage: true
         assistant: true
   - id: chat-roles
@@ -972,9 +1192,21 @@ chat completion 요청의 본문은 다음 모양입니다.
 
 **미리보기(preview)와 실제 전송(sent)은 다릅니다.** `build_request()` 는 요청을 만들기만 하고 **HTTP 호출을 하지 않습니다.** 그래서 실행해도 네트워크도, 요금도 없습니다. Request JSON 탭에 `미리보기`라고 표시됩니다. `chat()` 이나 `stream_chat()` 처럼 실제로 보낸 요청은 `전송됨`으로 표시되고, 같은 요청이라도 미리보기와 전송 기록이 따로 남습니다.
 
-### 참고: HTTP POST를 직접 구현하면
+### 헬퍼 예제와 직접 구현 예제의 차이
 
-`llm_client._post_json()` 이 하는 일은 결국 POST 한 번입니다. 원리를 확인하고 싶다면 아래처럼 직접 보내 볼 수 있습니다. (실행 환경이 브라우저인지에 따라 전송 도구만 다릅니다.)
+이 강의에는 같은 일을 하는 두 가지 예제가 있습니다. 둘을 헷갈리지 않게 구분하세요.
+
+| | 헬퍼(`llm_client.py`) | 직접 구현(`http_direct.py`) |
+| --- | --- | --- |
+| 목적 | 미션을 빠르게 진행 | HTTP 요청의 원리를 단계별로 이해 |
+| Endpoint·Header·Payload | `build_request()` 가 만듦 | 학습자가 직접 작성 |
+| HTTP POST | `chat()` / `stream_chat()` | 학습자가 직접 작성 |
+| Response Parsing | `chat()` 안에 포함 | 학습자가 직접 작성 |
+| 오류·시간 초과·SSE | 들어 있음 (심화 내용) | 다루지 않음 |
+
+파일 탭에서 `http_direct.py` 를 열면 TODO 1~5 가 있습니다. Endpoint, Header, JSON Payload, HTTP POST, Response Parsing 을 차례로 직접 채운 뒤 터미널에 `python http_direct.py` 를 입력하세요. 다섯 단계를 마치면 `[direct]` 로 시작하는 출력이 나옵니다. 이 파일은 미션 판정 대상이 아니라 이해를 돕는 심화 실습입니다.
+
+아래는 TODO 를 모두 채운 완성 예제입니다. 브라우저(수업용 worker)에서는 `pyodide.http.open_url`, 터미널 CPython 에서는 `urllib.request` 로 같은 요청을 보냅니다.
 
 ```python
 import json
@@ -982,23 +1214,24 @@ import llm_client
 
 request = llm_client.build_request(llm_client.default_messages())
 try:
-    from pyodide.http import pyfetch
-    response = await pyfetch(
-        request["url"],
-        method="POST",
-        headers=request["headers"],
-        body=json.dumps(request["body"]),
+    from pyodide.http import open_url
+    response = open_url(
+        request["url"], method="POST", headers=request["headers"],
+        data=json.dumps(request["body"]).encode("utf-8"),
     )
-    print(response.status, await response.string())
-except ImportError:  # CPython
+    status, text = response.status, response.read().decode("utf-8")
+except ImportError:  # CPython(터미널)
     import urllib.request
     data = json.dumps(request["body"]).encode("utf-8")
     call = urllib.request.Request(request["url"], data=data, headers=request["headers"], method="POST")
     with urllib.request.urlopen(call, timeout=45) as response:
-        print(response.status, response.read().decode("utf-8"))
+        status, text = response.status, response.read().decode("utf-8")
+
+data = json.loads(text)
+print(status, data["choices"][0]["message"]["content"])
 ```
 
-실습에서는 직접 전송 코드를 쓰지 않고, 오류 처리와 스트리밍까지 들어 있는 `chat()`·`stream_chat()` 을 사용합니다.
+스트리밍(SSE)을 직접 읽고 쓰려면 조각을 이어 붙이고 `[DONE]` 을 판별해야 하며, 중간에 끊긴 연결·시간 초과까지 처리해야 합니다. 이건 초보 단계의 범위를 넘으므로 `llm_client.stream_chat()` 의 구현을 심화 내용으로 읽어 보는 것으로 충분합니다.
 
 ### Mission 2 — 요청 JSON 만들기
 

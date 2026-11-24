@@ -1,7 +1,9 @@
-# Chat Completion Stabilization — QA Report (WO-19 ~ WO-28)
+# Chat Completion Stabilization — QA Report (WO-19 ~ WO-35)
 
 - **Repository**: HyangDan2/PKPilot0013
 - **Base commit**: `1135b59c22fd31162a33f114049c45c688173ca8`
+- **Final QA base**: `f0e9b37` on `fix/chat-completion-stabilization` (PR
+  [#9](https://github.com/HyangDan2/PKPilot0013/pull/9))
 - **Branch**: `fix/chat-completion-stabilization`
 - **Scope**: the Chat Completion lesson only. Python/Git lessons, the IDE shell and markdown lesson
   registration are unchanged.
@@ -22,18 +24,33 @@
 | WO-27 Lesson improvement | PASS | 8 steps kept; raw HTTP POST example, preview-vs-sent, glossary, streaming comparison exercise, HTTP error/timeout table, security limitation, examples aligned with checks |
 | WO-28 Docs & CI | PASS | README panel/check/network updates; `.github/workflows/deploy.yml` now installs Chromium and runs `npx playwright test --grep @smoke`, which includes the chat Mock/stream/stale and CORS cases |
 
+### Final QA round
+
+| WO | Result | Evidence |
+| --- | --- | --- |
+| WO-29 Trace data loss | PASS | `parseTrace` reads every line before capping; only chunks are expendable; event **and** byte caps actually apply; `slice(-0)` bug fixed; 1,200-chunk regression keeps Response/Usage/Stream |
+| WO-30 Streaming key protection | PASS | Masking is done on the accumulated `StreamRedactor` text, not per delta; `redactValue` masks JSON keys as well as values; split-key, Bearer and provider-echo regressions |
+| WO-31 HTTP/SSE timeout & cleanup | PASS | Absolute deadline from connect start; `fetch`/`reader.read`/`response.text` bounded; `AbortController` tied to the real request; reader/connection closed on normal, error and Stop paths; silent/slow-body/stalled-stream regressions |
+| WO-32 API settings validation | PASS | Live Mode with an empty Model ID no longer falls back to the mock model; Base URL scheme/host validated; optional-key policy kept; unsupported parameter errors explained |
+| WO-33 Mission check correctness | PASS | Next request must replay the previous assistant content; messages verified to accumulate per turn; call counts use completed request/response pairs; missing usage or a differing `finish_reason` no longer blocks a good answer |
+| WO-34 Mock stream consistency | PASS | Streaming and non-streaming return the same `finish_reason`; `max_tokens` bounds the estimated `completion_tokens`; the trailing `…` counts toward the budget |
+| WO-35 Direct-HTTP practice | PASS | New `http_direct.py` starting file (Endpoint/Header/Payload/POST/parse as TODOs 1–5), clearly separated from the helper example; the 8 missions and IDE shell are unchanged; SSE/error handling kept as advanced material |
+
 ## 2. Commands run
 
 ```text
 npm ci
 npx tsc --noEmit
-npm test                 # 219 tests, 18 files
+npm test                 # 238 tests, 18 files
 npm run build            # tsc + vite production build
 npm run test:e2e         # Playwright, desktop 1440×900 + mobile 390×844
 ```
 
-Results: `npm ci` PASS · typecheck PASS · unit **219/219 PASS** (18 files) · build PASS ·
-Playwright **27/27 PASS** (desktop 1440×900 + mobile 390×844, ~30 s) · 0 failures, 0 skipped.
+Results: `npm ci` PASS · typecheck PASS · unit **238/238 PASS** (18 files, WO-19…WO-35) · build PASS ·
+Playwright **28/28 PASS** (desktop 1440×900 + mobile 390×844) · 0 failures, 0 skipped.
+
+The E2E run used a separate preview port (`PK13_PORT=4193`) and the cached headless shell
+(`PW_CHROMIUM`), no paid API key.
 
 ## 3. New regression tests
 
@@ -52,6 +69,31 @@ Playwright **27/27 PASS** (desktop 1440×900 + mobile 390×844, ~30 s) · 0 fail
 - `tests/e2e/lessons.spec.ts` — `@smoke` chat run + streaming + stale-on-settings-change, and a
   browser test against a CORS-allowed and a CORS-denied local provider.
 
+Final QA round (WO-29 ~ WO-35):
+
+- `tests/trace.test.ts` — 1,200-chunk flood keeps Response/Usage/Stream (400 events, newest chunk
+  kept, under-cap ordering); priority-full cap drops all chunks (`slice(-0)`); a key split across
+  `StreamRedactor` pushes is masked, and `StreamRedactor.join` masks the same join; a key echoed as
+  a JSON key is masked.
+- `tests/chat-live.test.ts` — silent provider, slow body and stalled stream each time out and close
+  the server-side socket (short injected timeouts, no paid key); a split-key stream is masked in
+  `StreamRedactor.join` while the raw pieces stay in the trace; unsupported-parameter errors are
+  explained; Live Mode with an empty model or a malformed/`ftp` Base URL is rejected.
+- `tests/chat-completion.test.ts` — mock streaming vs non-streaming consistency (same
+  `finish_reason`, same content, `max_tokens` bound incl. `…`, chunk/response agreement); the Python
+  trace cap keeps Response/Usage/Stream under a chunk flood; mission-check fixtures cover verbatim
+  replay (pass), paraphrased/forgotten replay (fail), failed attempts not counted, and tolerant
+  `usage`.
+- `tests/python-runtime.test.ts` — cumulative stream deltas replace the shown text instead of
+  appending (`cumulative: true`/`false`); existing delta expectation keeps its fields.
+- `tests/session.test.ts` — two cumulative deltas replace the live stream text; the stream is
+  cleared after the run.
+- `tests/lessons.test.ts` — `http_direct.py` ships with TODOs 1–5, `open_url`/`urllib` hints, the
+  eight missions are intact, and the body links the practice file.
+- `tests/e2e/lessons.spec.ts` — `@smoke` Live Mode against a silent provider and a stalled stream:
+  the timeout message appears within ~1 s, the socket is closed, and a split key is masked in the
+  stdout and Stream tabs.
+
 ## 4. Screenshots
 
 Captured from two `vite preview` builds: the base commit `1135b59` in a worktree (before) and this
@@ -67,21 +109,27 @@ The Playwright suite also writes per-run captures under `.playwright-artifacts/`
 
 ## 5. Defects and limitations
 
-1. **Live timeout is not automated end-to-end.** The client stops a non-streaming request at 45 s
-   and a stream at 40 s; the runner-level timeout/Stop paths are unit-tested, and Stop is exercised
-   in E2E. A 45-second browser case was skipped to keep CI time bounded.
-2. **CORS cannot be reproduced outside a browser.** The Vitest suite drives CPython/urllib, which
+1. **Live timeouts are now automated, but on short deadlines.** The production client stops a
+   non-streaming request at 45 s and a stream at 40 s; the tests inject ~0.4–1 s via
+   `LLM_REQUEST_TIMEOUT` / `LLM_STREAM_TIMEOUT` and a browser runtime override, so the deadline,
+   abort and cleanup paths are covered without a minute-long CI step. The real 40/45 s values are
+   configuration, not separately timed in CI.
+2. **A CPython worker thread cannot be force-killed.** The code path aborts and closes the socket,
+   and the orphaned `urllib` thread is allowed to unwind, but Python cannot kill a thread; the
+   browser transport (used in the app) cancels the `fetch` outright.
+3. **CORS cannot be reproduced outside a browser.** The Vitest suite drives CPython/urllib, which
    ignores CORS; allow/deny is covered by the Playwright case against a local provider only.
-3. **Pyodide transport differs internally.** Browser streaming uses `fetch`/`ReadableStream`;
+4. **Pyodide transport differs internally.** Browser streaming uses `fetch`/`ReadableStream`;
    CPython uses urllib in a thread. Parsing, masking and error handling are the same code and are
    tested on both paths, but byte-level buffering can differ.
-4. **User code can read the key.** In Live Mode the key is an environment variable of the running
+5. **User code can read the key.** In Live Mode the key is an environment variable of the running
    Python program; edited code can `os.environ["LLM_API_KEY"]`. The lesson states this limitation.
    Mock Mode never receives the key.
-5. **Mock is simulated.** Token counts are `~4 chars / token`, temperature does not sample, and the
-   answer is rule-based. This is documented in the lesson.
-6. **Lesson body is Korean**, matching the other lessons; mission titles/goals/hints and the UI are
+6. **Mock is simulated.** Token counts are `~4 chars / token` — not a real tokenizer, so the
+   `max_tokens` bound and the reported `completion_tokens` are approximations of the same estimate.
+   Temperature does not sample, and the answer is rule-based; this is documented in the lesson.
+7. **Lesson body is Korean**, matching the other lessons; mission titles/goals/hints and the UI are
    bilingual (KO/EN).
-7. **CI consumes the Pyodide CDN.** The `@smoke` chat case loads the interpreter (~10 MB) from
+8. **CI consumes the Pyodide CDN.** The `@smoke` chat case loads the interpreter (~10 MB) from
    `cdn.jsdelivr.net`; a runner without outbound HTTPS would fail that step. It needs no paid API
    key, and the Live Mode cases use a loopback server.

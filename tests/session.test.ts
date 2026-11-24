@@ -417,6 +417,40 @@ describe('chat completion · the key lives in memory only', () => {
     }
   });
 
+  it('replaces the live stream when the worker sends cumulative deltas', async () => {
+    const workers = installFakeWorkers();
+    const ui = mount(chatLesson);
+    try {
+      let pending!: Promise<void>;
+      act(() => {
+        pending = ui.api.submit('python main.py');
+      });
+      const id = workers[0].lastRequestId;
+      // The worker masks the whole stream so far: a key split across deltas is
+      // caught once it is complete, and the page must show only the latest text.
+      act(() => {
+        workers[0].send({ type: 'delta', requestId: id, text: 'your key is sk-live-SEC', cumulative: true, at: 10 });
+      });
+      act(() => {
+        workers[0].send({ type: 'delta', requestId: id, text: 'your key is sk-l••••7654', cumulative: true, at: 20 });
+      });
+      expect(ui.api.stream).toMatchObject({
+        text: 'your key is sk-l••••7654',
+        chunks: 2,
+        firstAt: 10,
+      });
+      expect(ui.api.stream?.text).not.toContain('sk-live-SECRET');
+
+      workers[0].finish('mode: mock');
+      await act(async () => {
+        await pending;
+      });
+      expect(ui.api.stream).toBeNull();
+    } finally {
+      ui.unmount();
+    }
+  });
+
   it('does not hand the key to the worker in Mock Mode and snapshots the settings', async () => {
     const workers = installFakeWorkers();
     const ui = mount(chatLesson);

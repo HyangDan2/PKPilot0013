@@ -44,6 +44,68 @@ const messageRoles = (body: Record<string, unknown> | null): string[] => {
   return messages.map((message) => String(asRecord(message)?.role ?? ''));
 };
 
+const asMessages = (body: Record<string, unknown> | null): Record<string, unknown>[] | null => {
+  const messages = body?.messages;
+  if (!Array.isArray(messages)) return null;
+  return messages.map((raw) => asRecord(raw) ?? {});
+};
+
+const sameMessage = (left: Record<string, unknown>, right: Record<string, unknown>): boolean =>
+  left.role === right.role && left.content === right.content;
+
+const assistantContent = (event: TraceEvent): string | null => {
+  const response = asRecord(event.data);
+  const choices = response?.choices;
+  const choice = Array.isArray(choices) ? asRecord(choices[0]) : null;
+  const message = asRecord(choice?.message);
+  return typeof message?.content === 'string' && message.content.trim() !== '' ? message.content : null;
+};
+
+interface Turn {
+  request: TraceEvent;
+  response: TraceEvent | null;
+  /** The assistant text of this turn's response — what the next request must replay. */
+  assistant: string | null;
+}
+
+/**
+ * Pairs each *sent* request with the response that followed it. A request that
+ * failed (only an `error` event follows) is not a completed call, so mission
+ * counts follow successful request/response pairs rather than attempts.
+ */
+const turnPairs = (state: LessonState): Turn[] => {
+  const turns: Turn[] = [];
+  let open: Turn | null = null;
+  for (const event of state.trace) {
+    if (event.kind === 'request') {
+      open = { request: event, response: null, assistant: null };
+      turns.push(open);
+    } else if (event.kind === 'response' && open && !open.response) {
+      open.response = event;
+      open.assistant = assistantContent(event);
+    }
+  }
+  return turns;
+};
+
+const successfulTurns = (state: LessonState): Turn[] => turnPairs(state).filter((turn) => turn.response !== null);
+
+/** The next request must carry this turn's messages and then replay its answer. */
+const turnContinues = (previous: Turn, next: Turn): boolean => {
+  if (!previous.assistant) return false;
+  const before = asMessages(requestBody(previous.request));
+  const after = asMessages(requestBody(next.request));
+  if (!before || !after || after.length < before.length) return false;
+  for (let index = 0; index < before.length; index += 1) {
+    if (!sameMessage(before[index], after[index])) return false;
+  }
+  const appended = after.slice(before.length);
+  const replay = appended.findIndex((message) => message.role === 'assistant' && message.content === previous.assistant);
+  if (replay === -1) return false;
+  // ...and the learner then asked the next question.
+  return appended.slice(replay + 1).some((message) => message.role === 'user');
+};
+
 const assistantContentAfter = (body: Record<string, unknown> | null): boolean => {
   const messages = body?.messages;
   if (!Array.isArray(messages)) return false;
@@ -70,7 +132,8 @@ const authorizationOf = (event: TraceEvent): string | null => {
 function checkTraceRequest(check: TraceRequestCheck, state: LessonState): boolean {
   const requests = eventsOf(state, 'request');
   if (requests.length === 0) return false;
-  if (check.minTurns !== undefined && requests.length < check.minTurns) return false;
+  // Only a request that received a response counts as a completed call.
+  if (check.minTurns !== undefined && successfulTurns(state).length < check.minTurns) return false;
   if (check.sent === false) return false; // a sent request is never a preview
   const event = requests[requests.length - 1];
   const body = requestBody(event);
@@ -125,8 +188,13 @@ function checkTraceResponse(check: TraceResponseCheck, state: LessonState): bool
     if (typeof message?.content !== 'string' || message.content.trim() === '') return false;
   }
   if (check.usage) {
+    // Providers may omit usage (or send a partial one) on a perfectly good
+    // answer; the mission must not block on that. A usage that *is* there must
+    // at least carry one numeric token count.
     const usage = asRecord(response.usage) ?? asRecord(lastOf(state, 'usage'));
-    if (!usage || typeof usage.total_tokens !== 'number') return false;
+    if (usage && !['total_tokens', 'prompt_tokens', 'completion_tokens'].some((key) => typeof usage[key] === 'number')) {
+      return false;
+    }
   }
   return true;
 }
@@ -142,10 +210,15 @@ function checkTraceStream(check: TraceStreamCheck, state: LessonState): boolean 
 }
 
 function checkTraceTurns(check: TraceTurnsCheck, state: LessonState): boolean {
-  const requests = eventsOf(state, 'request');
-  if (requests.length < check.min) return false;
+  const turns = successfulTurns(state);
+  if (turns.length < check.min) return false;
   if (!check.assistantReuse) return true;
-  return requests.some((event) => assistantContentAfter(requestBody(event)));
+  // The second request must replay the first answer verbatim and then ask a new
+  // question; every following turn must accumulate the messages before it.
+  for (let index = 1; index < turns.length; index += 1) {
+    if (!turnContinues(turns[index - 1], turns[index])) return false;
+  }
+  return turns.length >= 2;
 }
 
 export function evaluateCheck(check: CheckSpec, state: LessonState): boolean {

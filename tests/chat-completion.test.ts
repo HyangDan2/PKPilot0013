@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { evaluateCheck } from '../src/lessons/checks';
 import { lessonById } from '../src/lessons';
 import type { Lesson, LessonState } from '../src/lessons/types';
-import { parseTrace } from '../src/tracks/python/trace';
+import { parseTrace, type TraceEvent } from '../src/tracks/python/trace';
 
 const lesson = lessonById('chat-completion') as Lesson;
 const KEY = 'sk-test-SECRET-123456';
@@ -196,7 +196,7 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
       for (const [name, content] of Object.entries(lesson.files)) {
         writeFileSync(join(dir, name), `${content}\n`, 'utf8');
       }
-      execFileSync('python3', ['-m', 'py_compile', 'llm_client.py', 'main.py', 'chatbot.py'], {
+      execFileSync('python3', ['-m', 'py_compile', 'llm_client.py', 'main.py', 'http_direct.py', 'chatbot.py'], {
         cwd: dir,
         stdio: 'pipe',
       });
@@ -315,5 +315,166 @@ describe.skipIf(!hasPython)('chat completion lesson, executed for real', () => {
     for (const id of ['chat-request', 'chat-first-call', 'chat-response', 'chat-roles', 'chat-parameters', 'chat-stream', 'chat-chatbot']) {
       expect(passes(id, starter), id).toBe(false);
     }
+  });
+
+  it('streams the same finish_reason and token budget as the plain response', () => {
+    const code = asyncProgram(`
+import json
+from llm_client import chat, default_messages, stream_chat
+
+plain = await chat(default_messages(), max_tokens=8)
+stream = await stream_chat(default_messages(), max_tokens=8)
+print("SUMMARY", json.dumps({
+    "plain_finish": plain["choices"][0]["finish_reason"],
+    "stream_finish": stream["choices"][0]["finish_reason"],
+    "plain_content": plain["choices"][0]["message"]["content"],
+    "stream_content": stream["choices"][0]["message"]["content"],
+    "completion_tokens": plain["usage"]["completion_tokens"],
+    "chunks": len(stream["chunks"]),
+}, ensure_ascii=False))
+`);
+    const { stdout, trace } = execute(code);
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1)!.replace(/^SUMMARY /, '')) as {
+      plain_finish: string;
+      stream_finish: string;
+      plain_content: string;
+      stream_content: string;
+      completion_tokens: number;
+      chunks: number;
+    };
+    // Both paths cut at the same max_tokens and say so the same way.
+    expect(summary.plain_finish).toBe('length');
+    expect(summary.stream_finish).toBe('length');
+    expect(summary.stream_content).toBe(summary.plain_content);
+    expect(summary.plain_content.endsWith('…')).toBe(true);
+    // The ellipsis is inside the budget, and usage agrees with it.
+    expect(summary.completion_tokens).toBeLessThanOrEqual(8);
+    expect(summary.chunks).toBeGreaterThan(1);
+
+    const events = trace
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { kind: string; data: Record<string, unknown> });
+    const streamed = events.filter((event) => event.kind === 'stream').at(-1);
+    expect(streamed?.data.finishReason).toBe('length');
+    expect(streamed?.data.chunks).toBe(summary.chunks);
+    const answer = events.filter((event) => event.kind === 'response').at(-1);
+    const answerData = answer?.data as unknown as { choices: { message: { content: string } }[] };
+    expect(answerData.choices[0].message.content).toBe(summary.stream_content);
+  });
+
+  it('keeps the response, usage and stream summary after the Python trace cap', () => {
+    const code = asyncProgram(`
+import llm_client
+llm_client.TRACE_MAX_EVENTS = 6
+await llm_client.stream_chat(llm_client.default_messages(), max_tokens=200)
+`);
+    const { trace } = execute(code);
+    const events = trace
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { kind: string; data: Record<string, unknown> });
+    const kinds = events.map((event) => event.kind);
+    // The cap dropped the excess chunks, not the events that explain the run.
+    expect(kinds).toContain('response');
+    expect(kinds).toContain('usage');
+    expect(kinds).toContain('stream');
+    const chunkLines = kinds.filter((kind) => kind === 'chunk').length;
+    expect(chunkLines).toBeGreaterThan(0);
+    const streamed = events.find((event) => event.kind === 'stream')!;
+    expect(streamed.data.done).toBe(true);
+    // The summary counts what really streamed, not just the lines that survived.
+    expect(Number(streamed.data.chunks)).toBeGreaterThan(chunkLines);
+    expect(parseTrace(trace).map((event) => event.kind)).toContain('stream');
+  });
+});
+
+/** The trace checks, fed hand-made events: no interpreter needed. */
+describe('chat completion trace checks', () => {
+  const event = (kind: TraceEvent['kind'], data: unknown): TraceEvent => ({ kind, data });
+  const system = { role: 'system', content: '너는 선생님이야.' };
+  const firstAsk = { role: 'user', content: '안녕' };
+  const secondAsk = { role: 'user', content: '방금 뭐라고 했어?' };
+  const answer = '첫 번째 답입니다.';
+
+  const requestEvent = (messages: { role: string; content: string }[]) =>
+    event('request', { body: { model: 'm', messages } });
+  const responseEvent = (content: string, extra: Record<string, unknown> = {}) =>
+    event('response', {
+      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+      ...extra,
+    });
+  const rolesFiles = { ...lesson.files, 'main.py': 'messages.append(first["choices"][0]["message"])\nrole = "system"\n' };
+  const stateWith = (trace: TraceEvent[], files: Record<string, string> = rolesFiles): LessonState => ({
+    ...baseState('', '', {}, ''),
+    files,
+    trace,
+  });
+
+  it('awards the multi-turn mission only when the answer is replayed verbatim', () => {
+    const good = stateWith([
+      requestEvent([system, firstAsk]),
+      responseEvent(answer),
+      requestEvent([system, firstAsk, { role: 'assistant', content: answer }, secondAsk]),
+      responseEvent('두 번째 답'),
+    ]);
+    expect(passes('chat-roles', good)).toBe(true);
+
+    const paraphrased = stateWith([
+      requestEvent([system, firstAsk]),
+      responseEvent(answer),
+      requestEvent([system, firstAsk, { role: 'assistant', content: '첫 번째 답입니다' }, secondAsk]),
+      responseEvent('두 번째 답'),
+    ]);
+    expect(passes('chat-roles', paraphrased)).toBe(false);
+
+    const forgotten = stateWith([
+      requestEvent([system, firstAsk]),
+      responseEvent(answer),
+      requestEvent([system, secondAsk]),
+      responseEvent('두 번째 답'),
+    ]);
+    expect(passes('chat-roles', forgotten)).toBe(false);
+  });
+
+  it('counts only requests that were answered', () => {
+    const withFailure = stateWith([
+      requestEvent([system, firstAsk]),
+      event('error', { status: 500, message: 'provider down' }),
+      requestEvent([system, firstAsk]),
+      responseEvent(answer),
+      requestEvent([system, firstAsk, { role: 'assistant', content: answer }, secondAsk]),
+      responseEvent('두 번째 답'),
+    ]);
+    // Two successful turns — the failed attempt does not count, but neither
+    // does it break the conversation that followed.
+    expect(passes('chat-roles', withFailure)).toBe(true);
+  });
+
+  it('does not block a live answer for a missing usage or a different finish_reason', () => {
+    const responseFiles = { ...lesson.files, 'main.py': 'choice = response["choices"][0]\n' };
+    const noUsage = stateWith(
+      [requestEvent([{ role: 'user', content: 'hi' }]), responseEvent('답', { finish_reason: 'length' })],
+      responseFiles,
+    );
+    expect(passes('chat-response', noUsage)).toBe(true);
+
+    const oddUsage = stateWith(
+      [
+        requestEvent([{ role: 'user', content: 'hi' }]),
+        responseEvent('답', { usage: { note: 'not counted' } }),
+      ],
+      responseFiles,
+    );
+    expect(passes('chat-response', oddUsage)).toBe(false);
+
+    const goodUsage = stateWith(
+      [
+        requestEvent([{ role: 'user', content: 'hi' }]),
+        responseEvent('답', { usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } }),
+      ],
+      responseFiles,
+    );
+    expect(passes('chat-response', goodUsage)).toBe(true);
   });
 });

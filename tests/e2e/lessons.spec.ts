@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 
 const overflow = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -170,6 +170,117 @@ test.describe('desktop 1440×900: landing → lesson IDE', () => {
     await page.screenshot({ path: testInfo.outputPath('pk13-pc-completion.png'), fullPage: false });
     expect(await overflow(page)).toBe(0);
     expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+  });
+
+  test('@smoke Live Mode times out a silent provider, cancels the connection and keeps a split key masked', async ({ page }) => {
+    const errors = collectErrors(page);
+    const KEY = 'sk-e2e-SECRET-1234';
+    const closed = new Set<string>();
+    const held: ServerResponse[] = [];
+    const server: Server = createServer((request, response) => {
+      const name = (request.url ?? '/').split('/')[1] ?? '';
+      response.setHeader('Access-Control-Allow-Origin', '*');
+      response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      if (request.method === 'OPTIONS') {
+        response.writeHead(204).end();
+        return;
+      }
+      if (name === 'silent') {
+        held.push(response);
+        response.on('close', () => closed.add(name));
+        return;
+      }
+      if (name === 'stall-stream') {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '첫 조각' } }] })}\r\n\r\n`);
+        held.push(response);
+        response.on('close', () => closed.add(name));
+        return;
+      }
+      if (name === 'split-key') {
+        const lines = ['your key is ', KEY.slice(0, 9), KEY.slice(9), ' ok'].map(
+          (piece) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}`,
+        );
+        lines.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}`);
+        lines.push('data: [DONE]');
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end(lines.join('\r\n\r\n') + '\r\n\r\n');
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = address && typeof address !== 'string' ? address.port : 0;
+
+    try {
+      await page.goto('./');
+      await page.getByTestId('lesson-card-chat-completion').click();
+      await page.getByTestId('completion-mode-live').click();
+      await page.getByTestId('completion-api-key').fill(KEY);
+      await page.getByTestId('completion-model').fill('e2e-model');
+      await page.getByTestId('completion-base-url').fill(`http://127.0.0.1:${port}/silent`);
+
+      // A provider that accepts the request and never answers must not hang the run.
+      await page.getByTestId('code-area').fill(
+        [
+          'import llm_client',
+          'llm_client.REQUEST_TIMEOUT = 1',
+          'try:',
+          '    await llm_client.chat(llm_client.default_messages())',
+          '    print("OK")',
+          'except RuntimeError as error:',
+          '    print("ERR", error)',
+        ].join('\n'),
+      );
+      await page.getByTestId('run').click();
+      await expect(page.getByTestId('py-stdout')).toContainText('1초 안에 끝나지 않았습니다', { timeout: 180_000 });
+      await expect.poll(() => closed.has('silent'), { timeout: 30_000 }).toBe(true);
+
+      // A stream that sends one chunk and then stalls is bounded the same way.
+      await page.getByTestId('completion-base-url').fill(`http://127.0.0.1:${port}/stall-stream`);
+      await page.getByTestId('code-area').fill(
+        [
+          'import llm_client',
+          'llm_client.STREAM_TIMEOUT = 1',
+          'try:',
+          '    await llm_client.stream_chat(llm_client.default_messages())',
+          '    print("OK")',
+          'except RuntimeError as error:',
+          '    print("ERR", error)',
+        ].join('\n'),
+      );
+      await page.getByTestId('run').click();
+      await expect(page.getByTestId('py-stdout')).toContainText('스트리밍이 1초 안에 끝나지 않았습니다', { timeout: 180_000 });
+      await expect.poll(() => closed.has('stall-stream'), { timeout: 30_000 }).toBe(true);
+
+      // A key split across two deltas is masked once the stream is shown as a whole.
+      await page.getByTestId('completion-base-url').fill(`http://127.0.0.1:${port}/split-key`);
+      await page.getByTestId('code-area').fill(
+        [
+          'import llm_client',
+          'reply = await llm_client.stream_chat(llm_client.default_messages())',
+          'print("STREAM", reply["choices"][0]["message"]["content"])',
+        ].join('\n'),
+      );
+      await page.getByTestId('run').click();
+      await expect(page.getByTestId('py-stdout')).toContainText('STREAM', { timeout: 180_000 });
+      await expect(page.getByTestId('py-stdout')).toContainText('sk-e••••1234');
+      await expect(page.getByTestId('py-stdout')).not.toContainText(KEY);
+
+      await page.getByTestId('completion-tab-stream').click();
+      await expect(page.getByTestId('completion-summary')).toBeVisible();
+      await expect(page.getByTestId('completion-stream')).toContainText('sk-e••••1234');
+      await expect(page.getByTestId('completion-stream')).not.toContainText(KEY);
+
+      // The only console noise allowed is the rejection of the aborted fetch itself.
+      const unexpected = errors.filter((message) => !/abort/i.test(message));
+      expect(unexpected, `console errors: ${unexpected.join(' | ')}`).toEqual([]);
+    } finally {
+      for (const response of held) response.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   test('@smoke Live Mode reaches a CORS-allowed mock and reports a CORS-denied one', async ({ page }) => {

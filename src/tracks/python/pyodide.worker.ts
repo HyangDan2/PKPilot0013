@@ -7,12 +7,14 @@
  *
  *   page → worker   { type: 'run', requestId, code, files, entry, dir, env }
  *   worker → page   { type: 'progress', stage, percent }
- *   worker → page   { type: 'delta', requestId, text, at }   ← while streaming
+ *   worker → page   { type: 'delta', requestId, text, cumulative, at }  ← while streaming
  *   worker → page   { type: 'done', requestId, ok, stdout, stderr, error, ms, phase, loadMs, trace }
  *
  * Every page-bound string passes through `redactText` first: the API key of the
  * run that is starting may not reach the main thread, whatever the learner's
- * program printed or whatever the provider echoed back.
+ * program printed or whatever the provider echoed back. Stream deltas carry the
+ * *cumulative* masked text, because a key can be split across two SSE pieces and
+ * only becomes visible once they are joined.
  *
  * Every run gets a fresh namespace and its own directory inside Pyodide's
  * virtual filesystem — and both are released again when the run ends
@@ -26,7 +28,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { executeProgram, runDirectory, type PyodideLike } from './runtime-core';
-import { redactRunText, redactText, redactTrace, sanitizeTrace, type TraceEvent } from './trace';
+import { StreamRedactor, redactRunText, redactTrace, sanitizeTrace, type TraceEvent } from './trace';
 
 const CDN = 'https://cdn.jsdelivr.net/pyodide/v0.28.3/full/';
 
@@ -76,6 +78,7 @@ scope.onmessage = async (event: any) => {
   const started = Date.now();
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const stream = new StreamRedactor(secret);
   let trace: TraceEvent[] = [];
   let ok = false;
   let error: string | undefined;
@@ -102,8 +105,10 @@ scope.onmessage = async (event: any) => {
         const record = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
         const text = typeof record.content === 'string' ? record.content : '';
         if (!text) return;
-        // The key may be echoed by a provider; the page never sees it raw.
-        post({ type: 'delta', requestId, text: redactText(text, secret), at: Date.now() });
+        // A provider may echo the key in pieces; only the cumulative text shows
+        // whether two SSE deltas together spell it, so the page replaces its
+        // buffer with this masked whole instead of appending a masked piece.
+        post({ type: 'delta', requestId, text: stream.push(text), cumulative: true, at: Date.now() });
       },
     });
     ok = true;

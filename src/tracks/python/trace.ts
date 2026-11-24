@@ -40,14 +40,14 @@ const isKind = (value: unknown): value is TraceKind => TRACE_KINDS.includes(valu
  * Keeps the newest events, but never drops the request, response, usage or
  * error that explain what happened — only chunks are expendable.
  */
-/** Keeps the newest events, but never drops the request, response, usage or
- * error that explain what happened — only chunks are expendable. */
 export function limitTrace(events: TraceEvent[], limit = MAX_TRACE_EVENTS): TraceEvent[] {
   if (events.length <= limit) return events;
   const priority = events.filter((event) => PRIORITY_KINDS.includes(event.kind));
   const rest = events.filter((event) => !PRIORITY_KINDS.includes(event.kind));
   const room = Math.max(0, limit - priority.length);
-  return [...priority, ...rest.slice(-room)].sort((a, b) => events.indexOf(a) - events.indexOf(b));
+  // `slice(-0)` is `slice(0)`: with no room left it returned every chunk, not none.
+  const keptChunks = room === 0 ? [] : rest.slice(-room);
+  return [...priority, ...keptChunks].sort((a, b) => events.indexOf(a) - events.indexOf(b));
 }
 
 /**
@@ -73,11 +73,15 @@ export function capTraceBytes(events: TraceEvent[], maxBytes = MAX_TRACE_BYTES):
   return kept.reverse();
 }
 
-/** Reads JSON Lines, skipping a partial last line or anything malformed. */
+/**
+ * Reads JSON Lines, skipping a partial last line or anything malformed. Every
+ * line is read before the caps apply: a program that streamed more chunks than
+ * the event budget still lands its final response, usage and stream summary,
+ * and only the excess chunks are dropped (`limitTrace` / `capTraceBytes`).
+ */
 export function parseTrace(text: string, limit = MAX_TRACE_EVENTS): TraceEvent[] {
   const events: TraceEvent[] = [];
   for (const line of text.split('\n')) {
-    if (events.length >= limit) break;
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
@@ -122,13 +126,36 @@ export const redactText = (text: string, secret: string, masked = maskKey(secret
   return next;
 };
 
+/**
+ * Masks a stream as it grows. A key split across SSE deltas is only visible in
+ * the concatenation, so the caller must show `push()`'s full result rather than
+ * appending the pieces: the key is caught once its last character arrives, and
+ * the whole text is recomputed masked.
+ */
+export class StreamRedactor {
+  private raw = '';
+
+  constructor(private readonly secret: string) {}
+
+  push(piece: string): string {
+    this.raw += piece;
+    return redactText(this.raw, this.secret);
+  }
+
+  /** What a panel should show when it only has the individual pieces. */
+  static join(pieces: readonly string[], secret: string): string {
+    return redactText(pieces.join(''), secret);
+  }
+}
+
 const redactValue = (value: unknown, secret: string, masked: string): unknown => {
   if (typeof value === 'string') return redactText(value, secret, masked);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, secret, masked));
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = redactValue(item, secret, masked);
+      // A JSON key can carry the secret too: mask both halves of the pair.
+      out[redactText(key, secret, masked)] = redactValue(item, secret, masked);
     }
     return out;
   }

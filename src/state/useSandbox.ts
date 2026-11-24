@@ -379,7 +379,9 @@ export function useSandbox(lesson: Lesson, lang: Lang): SandboxApi {
                     };
                     return {
                       ...base,
-                      text: base.text + delta.text,
+                      // The worker sends the masked stream so far, so a key split
+                      // across two deltas never survives in the joined text.
+                      text: delta.cumulative ? delta.text : base.text + delta.text,
                       chunks: base.chunks + 1,
                       firstAt: base.firstAt ?? delta.at,
                     };
